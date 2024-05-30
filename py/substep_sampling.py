@@ -86,9 +86,9 @@ class SamplerState:
             self.sigma, self.sigma_next, eta=self.reta
         )
 
-    def model(self, x, sigma, *, model_call_idx=0, **kwargs):
+    def model(self, x, sigma, *, model_call_idx=-1, **kwargs):
         mcc = self.model_call_cache
-        if mcc is None or model_call_idx >= mcc.size:
+        if mcc is None or model_call_idx < 0 or model_call_idx >= mcc.size:
             return self.model_(x, sigma * self.s_in, **self.extra_args, **kwargs)
         if model_call_idx < mcc.pos:
             print("CACHED MODEL CALL", model_call_idx)
