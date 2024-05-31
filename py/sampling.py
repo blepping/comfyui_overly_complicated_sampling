@@ -40,6 +40,7 @@ def composable_sampler(
         model_call_cache=None
         if "model_call_cache" not in copts
         else History(x, copts["model_call_cache"]),
+        model_call_cache_threshold=copts.get("model_call_cache_threshold", 0),
         noise_sampler=noise_sampler,
         callback=callback,
         eta=eta if eta != 1.0 else copts["eta"],
@@ -60,7 +61,7 @@ def composable_sampler(
         samplers += (ssampler,) * sitem["substeps"]
         substeps += sitem["substeps"]
     msitem = copts["merge_sampler"]
-    if copts["merge_method"] == "sample":
+    if copts["merge_method"] in ("sample", "sample_uncached"):
         custom_noise = msitem.get("custom_noise_opt")
         if custom_noise is None:
             curr_ns = noise_sampler

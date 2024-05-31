@@ -113,7 +113,7 @@ class ComposableStepSampler:
                         "round": False,
                     },
                 ),
-                "substeps": ("INT", {"default": 1, "min": 1, "max": 100}),
+                "substeps": ("INT", {"default": 1, "min": 1, "max": 1000}),
                 "step_method": (tuple(STEP_SAMPLERS.keys()),),
             },
             "optional": {

@@ -52,6 +52,7 @@ class SamplerState:
         callback=None,
         denoised=None,
         model_call_cache=None,
+        model_call_cache_threshold=0,
         eta=1.0,
         reta=1.0,
         s_noise=1.0,
@@ -69,6 +70,7 @@ class SamplerState:
         self.callback_ = callback
         self.noise_sampler = noise_sampler
         self.model_call_cache = model_call_cache
+        self.model_call_cache_threshold = model_call_cache_threshold
         self.update(idx)
 
     def update(self, idx=None):
@@ -89,14 +91,49 @@ class SamplerState:
     def model(self, x, sigma, *, model_call_idx=-1, **kwargs):
         mcc = self.model_call_cache
         if mcc is None or model_call_idx < 0 or model_call_idx >= mcc.size:
+            print("MODEL CALL", model_call_idx)
             return self.model_(x, sigma * self.s_in, **self.extra_args, **kwargs)
-        if model_call_idx < mcc.pos:
+        if (
+            model_call_idx < mcc.pos
+            and model_call_idx >= self.model_call_cache_threshold
+        ):
             print("CACHED MODEL CALL", model_call_idx)
             return mcc.history[model_call_idx]
         result = self.model_(x, sigma * self.s_in, **self.extra_args, **kwargs)
+
         mcc.push(result)
         print("CACHING MODEL CALL", model_call_idx, mcc.size, mcc.pos)
         return result
+
+    def model_jvp(self, x, sigma, tangents, *, model_call_idx=-1, **kwargs):
+        def call_model(x, sigma):
+            return self.model_(x, sigma * self.s_in, **self.extra_args)
+
+        mcc = self.model_call_cache
+        if mcc is not None:
+            if not hasattr(self, "model_jvp_call_cache"):
+                self.model_jvp_call_cache = History(x, mcc.size)
+            jmcc = self.model_jvp_call_cache
+
+        if mcc is None or model_call_idx < 0 or model_call_idx >= mcc.size:
+            print("JMODEL CALL", model_call_idx)
+            return torch.func.jvp(call_model, (x, sigma), tangents)
+        if mcc.size != jmcc.size or mcc.pos != jmcc.pos:
+            raise RuntimeError(
+                "TTM JVP steps with caching enabled currently must run first"
+            )
+        if (
+            model_call_idx < mcc.pos
+            and model_call_idx >= self.model_call_cache_threshold
+        ):
+            print("JCACHED MODEL CALL", model_call_idx)
+            return mcc.history[model_call_idx], jmcc.history[model_call_idx]
+        denoised, denoised_prime = torch.func.jvp(call_model, (x, sigma), tangents)
+
+        mcc.push(denoised)
+        jmcc.push(denoised_prime)
+        print("JCACHING MODEL CALL", model_call_idx, mcc.size, mcc.pos)
+        return denoised, denoised_prime
 
     def get_ancestral_step(self, eta=1.0):
         return get_ancestral_step(self.sigma, self.sigma_next, eta=eta)
@@ -108,6 +145,7 @@ class SamplerState:
             "dhist",
             "xhist",
             "model_call_cache",
+            "model_call_cache_threshold",
             "extra_args",
             "s_in",
             "eta",

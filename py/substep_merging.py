@@ -31,9 +31,7 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
         for subidx, ssampler in enumerate(self.samplers):
             print("  SUBSTEP", subidx, ssampler)
             ss.denoised = ss.model(x, ss.sigma * ss.s_in)
-            z_k, noise_strength = (
-                ssampler.step if ss.sigma_next != 0 else ssampler.final_step
-            )(x, ss)
+            z_k, noise_strength = ssampler.step(x, ss)
             z_avg += renoise_weight * z_k
             if ss.sigma_next == 0:
                 continue
@@ -69,18 +67,17 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
         stretch = (ss.sigma - ss.sigma_next) * self.stretch
         sig_adj = ss.sigma + stretch
         ss = self.ss.clone_edit(sigma=sig_adj)
+        orig_x = x
         x = x + ss.noise_sampler(orig_ss.sigma, ss.sigma_next) * stretch * ss.s_noise
         ss.denoised = ss.model(x, sig_adj * ss.s_in)
         noise_total = 0.0
         for subidx, ssampler in enumerate(self.samplers):
             print("  SUBSTEP", subidx, ssampler)
-            curr_x = x + scale_noise(
+            curr_x = orig_x + scale_noise(
                 ssampler.noise_sampler(sig_adj, ss.sigma_next),
                 ssampler.s_noise * stretch,
             )
-            z_k, noise_strength = (
-                ssampler.step if ss.sigma_next != 0 else ssampler.final_step
-            )(curr_x, ss)
+            z_k, noise_strength = ssampler.step(curr_x, ss)
             z_avg += renoise_weight * z_k
             if ss.sigma_next == 0:
                 continue
@@ -99,13 +96,12 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
 
 
 class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
-    def __init__(
-        self, ss, samplers, *, merge_sample_skip=False, merge_sampler, **kwargs
-    ):
+    cache_model = True
+
+    def __init__(self, ss, samplers, *, merge_sampler, **kwargs):
         super().__init__(ss, samplers, **kwargs)
         self.merge_sampler = merge_sampler
         self.merge_ss = None
-        self.merge_sample_skip = merge_sample_skip
 
     def step(self, x):
         ss = self.ss
@@ -116,31 +112,25 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
         ss.denoised = None
         stretch = (ss.sigma - ss.sigma_next) * self.stretch
         sig_adj = ss.sigma + stretch
-        if self.merge_sample_skip:
-            stretch = (ss.sigma - ss.sigma_next) * self.stretch
-            sig_adj = ss.sigma + stretch
-            ss.denoised = ss.model(
-                curr_x,
-                # + ss.noise_sampler(sig_adj.sigma, ss.sigma_next) * stretch * ss.s_noise,
-                ss.s_in * sig_adj,
-            )
+        ss = self.ss.clone_edit(sigma=sig_adj)
         for subidx, ssampler in enumerate(self.samplers):
-            if not self.merge_sample_skip:
-                ss.denoised = ss.model(curr_x, ss.s_in * ss.sigma)
-            else:
-                curr_x = (
-                    x
-                    + ssampler.noise_sampler(sig_adj, ss.sigma_next)
-                    * ssampler.s_noise
-                    * stretch
+            if subidx == 0 or not self.cache_model:
+                ss.denoised = ss.model(
+                    curr_x,
+                    # + ss.noise_sampler(sig_adj.sigma, ss.sigma_next) * stretch * ss.s_noise,
+                    ss.s_in * sig_adj,
                 )
-            print("  SUBSTEP", subidx, ssampler)
-            z_k, noise_strength = (
-                ssampler.step if ss.sigma_next != 0 else ssampler.final_step
-            )(curr_x, ss)
+            curr_x = (
+                x
+                + ssampler.noise_sampler(sig_adj, ss.sigma_next)
+                * ssampler.s_noise
+                * stretch
+            )
+            print("  SUBSTEP", subidx, ssampler, stretch)
+            z_k, noise_strength = ssampler.step(curr_x, ss)
             z_avg += renoise_weight * z_k
             curr_x = z_k
-            if not noise_strength or ss.sigma_next == 0 or self.merge_sample_skip:
+            if not noise_strength or ss.sigma_next == 0:
                 continue
             curr_x += (
                 ssampler.noise_sampler(ss.sigma, ss.sigma_next)
@@ -165,15 +155,14 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
                 xhist=History(x, 2),
                 s_noise=msampler.s_noise,
                 eta=msampler.eta,
+                model_call_cache=None,
             )
         else:
             merge_ss = self.merge_ss
             merge_ss.denoised = result
         merge_ss.update(self.ss.idx)
         final = merge_ss.sigma_next == 0
-        merged, noise_strength = (msampler.step if not final else msampler.final_step)(
-            x, merge_ss
-        )
+        merged, noise_strength = msampler.step(x, merge_ss)
         if not final:
             ss = self.ss
             merged = (
@@ -186,6 +175,10 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
         merge_ss.xhist.push(merged)
         merge_ss.denoised = None
         return merged
+
+
+class SampleUncachedMergeSubstepsSampler(SampleMergeSubstepsSampler):
+    cache_model = False
 
 
 class DivideMergeSubstepsSampler(MergeSubstepsSampler):
@@ -226,9 +219,7 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
             subss.update(subidx)
             subss.denoised = subss.model(x, subss.sigma)
             ssampler = samplers[subidx]
-            x, noise_strength = (
-                ssampler.step if subss.sigma_next != 0 else ssampler.final_step
-            )(x, subss)
+            x, noise_strength = ssampler.step(x, subss)
             if not noise_strength or subss.sigma_next == 0:
                 continue
             x = (
@@ -246,7 +237,8 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
 
 MERGE_SUBSTEPS_CLASSES = {
     "normal": NormalMergeSubstepsSampler,
+    "divide": DivideMergeSubstepsSampler,
     "average": AverageMergeSubstepsSampler,
     "sample": SampleMergeSubstepsSampler,
-    "divide": DivideMergeSubstepsSampler,
+    "sample_uncached": SampleUncachedMergeSubstepsSampler,
 }

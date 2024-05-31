@@ -27,7 +27,7 @@ class SingleStepSampler:
         raise NotImplementedError
 
     # Euler - based on original ComfyUI implementation
-    def final_step(self, x, ss):
+    def euler_step(self, x, ss):
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         d = to_d(x, ss.sigma, ss.denoised)
         dt = sigma_down - ss.sigma
@@ -45,12 +45,10 @@ class ReversibleSingleStepSampler(SingleStepSampler):
 
 class EulerStep(SingleStepSampler):
     name = "euler"
-
-    def step(self, x, ss):
-        return self.final_step(x, ss)
+    step = SingleStepSampler.euler_step
 
 
-class DPMPP2MStep(SingleStepSampler):
+class DPMPPStepBase(SingleStepSampler):
     @staticmethod
     def sigma_fn(t):
         return t.neg().exp()
@@ -59,7 +57,11 @@ class DPMPP2MStep(SingleStepSampler):
     def t_fn(t):
         return t.log().neg()
 
+
+class DPMPP2MStep(DPMPPStepBase):
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         t, t_next = self.t_fn(ss.sigma), self.t_fn(ss.sigma_next)
         h = t_next - t
         st, st_next = self.sigma_fn(t), self.sigma_fn(t_next)
@@ -80,6 +82,8 @@ class DPMPP2MSDEStep(SingleStepSampler):
         self.solver_type = solver_type
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         denoised = ss.denoised
         if ss.sigma_next == 0:
             return denoised, None
@@ -115,6 +119,8 @@ class DPMPP3MSDEStep(SingleStepSampler):
     name = "dpmpp_3m_sde"
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         denoised = ss.denoised
         if ss.sigma_next == 0:
             return denoised, 0
@@ -153,6 +159,8 @@ class ReversibleHeunStep(ReversibleSingleStepSampler):
     name = "reversible_heun"
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(self.reta)
         dt = sigma_down - ss.sigma
@@ -180,6 +188,8 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
     name = "reversible_heun_1s"
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         # Reversible Heun-inspired update (first-order)
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(self.reta)
@@ -225,6 +235,8 @@ class RESStep(SingleStepSampler):
         pass
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         denoised = ss.denoised
         lam_next = (
@@ -254,6 +266,8 @@ class TrapezoidalStep(SingleStepSampler):
     name = "trapezoidal"
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         dt = ss.sigma_next - ss.sigma
         denoised = ss.denoised
@@ -282,6 +296,8 @@ class BogackiStep(ReversibleSingleStepSampler):
     reversible = False
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(self.reta)
         sigma, sigma_next = ss.sigma, sigma_down
@@ -329,6 +345,8 @@ class RK4Step(SingleStepSampler):
     name = "rk4"
 
     def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
         sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
         sigma = ss.sigma
         # Calculate the derivative using the model
@@ -388,7 +406,7 @@ class EulerDancingStep(SingleStepSampler):
         self.leap = leap
         self.dyn_deta_start = dyn_deta_start
         self.dyn_deta_end = dyn_deta_end
-        if dyn_deta_mode not in ("lerp", "deta"):
+        if dyn_deta_mode not in ("lerp", "lerp_alt", "deta"):
             raise ValueError("Bad dyn_deta_mode")
         self.dyn_deta_mode = dyn_deta_mode
 
@@ -407,6 +425,8 @@ class EulerDancingStep(SingleStepSampler):
         # Euler method
         dt = sigma_down - ss.sigma
         x = x + d * dt
+        if curr_leap == 1:
+            return x, sigma_up
         if None not in (self.dyn_deta_start, self.dyn_deta_end):
             if self.dyn_deta_start == self.dyn_deta_end:
                 dance_scale = self.dyn_deta_start
@@ -421,28 +441,138 @@ class EulerDancingStep(SingleStepSampler):
         print("DANCE?", dance_scale, ss.idx, is_danceable, curr_leap)
         if not is_danceable or abs(dance_scale) < 1e-04:
             return x, sigma_up
-        orig_x = x
+        sigma_down_normal, sigma_up_normal = get_ancestral_step(
+            ss.sigma, ss.sigma_next, self.eta
+        )
+        if self.dyn_deta_mode == "lerp":
+            dt_normal = sigma_down_normal - ss.sigma
+            x_normal = x + d * dt_normal
+        else:
+            x_normal = x
         x = x + self.noise_sampler(ss.sigma, sigma_leap) * self.s_noise * sigma_up
         sigma_down2, sigma_up2 = get_ancestral_step(
             sigma_leap,
             ss.sigma_next,
-            eta=self.deta * (1.0 if self.dyn_deta_mode == "lerp" else dance_scale),
+            eta=self.deta * (1.0 if self.dyn_deta_mode != "deta" else dance_scale),
         )
         d_2 = to_d(x, sigma_leap, ss.denoised)
         dt_2 = sigma_down2 - sigma_leap
         result = x + d_2 * dt_2
+        noise_diff = sigma_up2 - sigma_up * dance_scale
+        noise_scale = sigma_up2 + noise_diff * (0.025 * curr_leap)
+        print(
+            "DANCE NOISE",
+            noise_scale,
+            "--",
+            sigma_up_normal,
+            sigma_up_normal - noise_scale,
+        )
         if self.dyn_deta_mode == "deta" or dance_scale == 1.0:
-            return result, sigma_up2
-        result = torch.lerp(orig_x, result, dance_scale)
+            return result, noise_scale
+        result = torch.lerp(x_normal, result, dance_scale)
         # FIXME: Broken for noise samplers that care about s/sn
-        return result, torch.lerp(sigma_up, sigma_up2, dance_scale)
+        return result, noise_scale
+
+
+class DPMPP2SStep(DPMPPStepBase):
+    name = "dpmpp_2s"
+
+    def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
+        t_fn, sigma_fn = self.t_fn, self.sigma_fn
+        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        # DPM-Solver++(2S)
+        t, t_next = t_fn(ss.sigma), t_fn(sigma_down)
+        r = 1 / 2
+        h = t_next - t
+        s = t + r * h
+        x_2 = (sigma_fn(s) / sigma_fn(t)) * x - (-h * r).expm1() * ss.denoised
+        denoised_2 = ss.model(x_2, sigma_fn(s), model_call_idx=0)
+        x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_2
+        return x, sigma_up
+
+
+class DPMPPSDEStep(DPMPPStepBase):
+    name = "dpmpp_sde"
+
+    def __init__(self, *args, r=1 / 2, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.r = r
+
+    def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return self.euler_step(x, ss)
+        t_fn, sigma_fn = self.t_fn, self.sigma_fn
+        r, eta, s_noise = self.r, self.eta, self.s_noise
+        noise_sampler = self.noise_sampler
+        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        # DPM-Solver++
+        t, t_next = t_fn(ss.sigma), t_fn(ss.sigma_next)
+        h = t_next - t
+        s = t + h * r
+        fac = 1 / (2 * r)
+
+        # Step 1
+        sd, su = get_ancestral_step(sigma_fn(t), sigma_fn(s), eta)
+        s_ = t_fn(sd)
+        x_2 = (sigma_fn(s_) / sigma_fn(t)) * x - (t - s_).expm1() * ss.denoised
+        x_2 = x_2 + noise_sampler(sigma_fn(t), sigma_fn(s)) * s_noise * su
+        denoised_2 = ss.model(x_2, sigma_fn(s), model_call_idx=0)
+
+        # Step 2
+        sd, su = get_ancestral_step(sigma_fn(t), sigma_fn(t_next), eta)
+        t_next_ = t_fn(sd)
+        denoised_d = (1 - fac) * ss.denoised + fac * denoised_2
+        x = (sigma_fn(t_next_) / sigma_fn(t)) * x - (t - t_next_).expm1() * denoised_d
+        return x, su
+
+
+# Based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+# Which was originally written by Katherine Crowson
+class TTMJVPStep(SingleStepSampler):
+    name = "ttm_jvp"
+
+    def __init__(self, *args, alternate_phi_2_calc=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.alternate_phi_2_calc = alternate_phi_2_calc
+
+    def step(self, x, ss):
+        if ss.sigma_next == 0:
+            return ss.denoised, ss.sigma.new_zeros(1)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        sigma, sigma_next = ss.sigma, ss.sigma_next
+        # 2nd order truncated Taylor method
+        t, s = -sigma.log(), -sigma_next.log()
+        h = s - t
+        h_eta = h * (self.eta + 1)
+
+        eps = to_d(x, sigma, ss.denoised)
+        denoised, denoised_prime = ss.model_jvp(
+            x, sigma, (eps * -sigma, -sigma), model_call_idx=0
+        )
+
+        phi_1 = -torch.expm1(-h_eta)
+        if self.alternate_phi_2_calc:
+            phi_2 = torch.expm1(-h) + h  # seems to work better with eta > 0
+        else:
+            phi_2 = torch.expm1(-h_eta) + h_eta
+        x = torch.exp(-h_eta) * x + phi_1 * ss.denoised + phi_2 * denoised_prime
+
+        if not self.eta:
+            return x, ss.sigma.new_zeros(1)
+
+        phi_1_noise = torch.sqrt(-torch.expm1(-2 * h * self.eta))
+        return x, sigma_next * phi_1_noise
 
 
 STEP_SAMPLERS = {
     "euler": EulerStep,
+    "dpmpp_sde": DPMPPSDEStep,
     "dpmpp_2m": DPMPP2MStep,
     "dpmpp_2m_sde": DPMPP2MSDEStep,
     "dpmpp_3m_sde": DPMPP3MSDEStep,
+    "dpmpp_2s": DPMPP2SStep,
     "reversible_heun": ReversibleHeunStep,
     "reversible_heun_1s": ReversibleHeun1SStep,
     "res": RESStep,
@@ -451,6 +581,7 @@ STEP_SAMPLERS = {
     "reversible_bogacki": ReversibleBogackiStep,
     "rk4": RK4Step,
     "euler_dancing": EulerDancingStep,
+    "ttm_jvp": TTMJVPStep,
 }
 
 __all__ = (
@@ -459,6 +590,7 @@ __all__ = (
     "DPMPP2MStep",
     "DPMPP2MSDEStep",
     "DPMPP3MSDEStep",
+    "DPMPP2SStep",
     "ReversibleHeunStep",
     "ReversibleHeun1SStep",
     "RESStep",
@@ -466,4 +598,5 @@ __all__ = (
     "BogackiStep",
     "ReversibleBogackiStep",
     "EulerDancingStep",
+    "TTMJVPStep",
 )
