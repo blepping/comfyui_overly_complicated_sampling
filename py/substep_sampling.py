@@ -37,13 +37,75 @@ class History:
         self.last = None
 
 
+class ModelCallCache:
+    def __init__(
+        self, model, x, s_in, extra_args, *, size=0, max_use=1000000, threshold=1
+    ):
+        self.size = size
+        self.model = model
+        self.threshold = threshold
+        self.s_in = s_in
+        self.extra_args = extra_args
+        self.max_use = max_use
+        if self.size < 1:
+            return
+        self.mcc = torch.zeros(size, *x.shape, device=x.device, dtype=x.dtype)
+        self.jmcc = torch.zeros_like(self.mcc)
+        self.reset_cache()
+
+    def reset_cache(self):
+        size = self.size
+        self.slot = [None] * size
+        self.jslot = [None] * size
+        self.slot_use = [self.max_use] * size
+
+    def get(self, idx, *, jvp=False):
+        idx -= self.threshold
+        if (
+            idx >= self.size
+            or idx < 0
+            or self.slot[idx] is None
+            or self.slot_use[idx] < 1
+        ):
+            return None
+        if jvp and self.jslot[idx] is None:
+            return None
+        self.slot_use[idx] -= 1
+        return self.slot[idx] if not jvp else (self.slot[idx], self.jslot[idx])
+
+    def set(self, idx, denoised, jdenoised=None):
+        idx -= self.threshold
+        if idx < 0 or idx >= self.size:
+            return
+        self.slot_use[idx] = self.max_use
+        self.slot[idx] = denoised
+        self.jslot[idx] = jdenoised
+
+    def call_model(self, x, sigma, **kwargs):
+        return self.model(x, sigma * self.s_in, **self.extra_args, **kwargs)
+
+    def __call__(self, x, sigma, *, model_call_idx=0, tangents=None, **kwargs):
+        result = self.get(model_call_idx, jvp=tangents is not None)
+        # print(
+        #     f"MODEL: idx={model_call_idx}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
+        # )
+        if result is not None:
+            return result
+        if tangents is None:
+            denoised = self.call_model(x, sigma, **kwargs)
+            self.set(model_call_idx, denoised)
+            return denoised
+        denoised, denoised_prime = torch.func.jvp(self.call_model, (x, sigma), tangents)
+        self.set(model_call_idx, denoised, jdenoised=denoised_prime)
+        return denoised, denoised_prime
+
+
 class SamplerState:
     def __init__(
         self,
         model,
         sigmas,
         idx,
-        s_in,
         dhist,
         xhist,
         extra_args,
@@ -51,17 +113,14 @@ class SamplerState:
         noise_sampler,
         callback=None,
         denoised=None,
-        model_call_cache=None,
-        model_call_cache_threshold=0,
         eta=1.0,
         reta=1.0,
         s_noise=1.0,
     ):
-        self.model_ = model
+        self.model = model
         self.dhist = dhist
         self.xhist = xhist
         self.extra_args = extra_args
-        self.s_in = s_in
         self.eta = eta
         self.reta = reta
         self.s_noise = s_noise
@@ -69,8 +128,6 @@ class SamplerState:
         self.denoised = denoised
         self.callback_ = callback
         self.noise_sampler = noise_sampler
-        self.model_call_cache = model_call_cache
-        self.model_call_cache_threshold = model_call_cache_threshold
         self.update(idx)
 
     def update(self, idx=None):
@@ -88,66 +145,16 @@ class SamplerState:
             self.sigma, self.sigma_next, eta=self.reta
         )
 
-    def model(self, x, sigma, *, model_call_idx=-1, **kwargs):
-        mcc = self.model_call_cache
-        if mcc is None or model_call_idx < 0 or model_call_idx >= mcc.size:
-            print("MODEL CALL", model_call_idx)
-            return self.model_(x, sigma * self.s_in, **self.extra_args, **kwargs)
-        if (
-            model_call_idx < mcc.pos
-            and model_call_idx >= self.model_call_cache_threshold
-        ):
-            print("CACHED MODEL CALL", model_call_idx)
-            return mcc.history[model_call_idx]
-        result = self.model_(x, sigma * self.s_in, **self.extra_args, **kwargs)
-
-        mcc.push(result)
-        print("CACHING MODEL CALL", model_call_idx, mcc.size, mcc.pos)
-        return result
-
-    def model_jvp(self, x, sigma, tangents, *, model_call_idx=-1, **kwargs):
-        def call_model(x, sigma):
-            return self.model_(x, sigma * self.s_in, **self.extra_args)
-
-        mcc = self.model_call_cache
-        if mcc is not None:
-            if not hasattr(self, "model_jvp_call_cache"):
-                self.model_jvp_call_cache = History(x, mcc.size)
-            jmcc = self.model_jvp_call_cache
-
-        if mcc is None or model_call_idx < 0 or model_call_idx >= mcc.size:
-            print("JMODEL CALL", model_call_idx)
-            return torch.func.jvp(call_model, (x, sigma), tangents)
-        if mcc.size != jmcc.size or mcc.pos != jmcc.pos:
-            raise RuntimeError(
-                "TTM JVP steps with caching enabled currently must run first"
-            )
-        if (
-            model_call_idx < mcc.pos
-            and model_call_idx >= self.model_call_cache_threshold
-        ):
-            print("JCACHED MODEL CALL", model_call_idx)
-            return mcc.history[model_call_idx], jmcc.history[model_call_idx]
-        denoised, denoised_prime = torch.func.jvp(call_model, (x, sigma), tangents)
-
-        mcc.push(denoised)
-        jmcc.push(denoised_prime)
-        print("JCACHING MODEL CALL", model_call_idx, mcc.size, mcc.pos)
-        return denoised, denoised_prime
-
     def get_ancestral_step(self, eta=1.0):
         return get_ancestral_step(self.sigma, self.sigma_next, eta=eta)
 
     def clone_edit(self, **kwargs):
         obj = self.__class__.__new__(self.__class__)
         for k in (
-            "model_",
+            "model",
             "dhist",
             "xhist",
-            "model_call_cache",
-            "model_call_cache_threshold",
             "extra_args",
-            "s_in",
             "eta",
             "reta",
             "s_noise",

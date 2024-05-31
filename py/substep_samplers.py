@@ -18,6 +18,7 @@ class SingleStepSampler:
         self,
         *,
         noise_sampler=None,
+        substeps=1,
         s_noise=1.0,
         eta=1.0,
         dyn_eta_start=None,
@@ -31,6 +32,7 @@ class SingleStepSampler:
         self.dyn_eta_end = dyn_eta_end
         self.noise_sampler = noise_sampler
         self.weight = weight
+        self.substeps = substeps
         self.kwargs = kwargs
 
     def step(self, x, ss):
@@ -207,7 +209,7 @@ class ReversibleHeunStep(ReversibleSingleStepSampler):
         x_pred = x + d * dt
 
         # Denoised sample at the next sigma
-        denoised_next = ss.model(x_pred, sigma_down, model_call_idx=0)
+        denoised_next = ss.model(x_pred, sigma_down, model_call_idx=1)
 
         # Calculate the derivative at the next sigma
         d_next = to_d(x_pred, sigma_down, denoised_next)
@@ -241,7 +243,7 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
             sigma_i,
             ss.dhist[-1]
             if len(ss.dhist)
-            else ss.model(eff_x, sigma_i, model_call_idx=0),
+            else ss.model(eff_x, sigma_i, model_call_idx=1),
         )
 
         # Predict the sample at the next sigma using Euler step
@@ -289,7 +291,7 @@ class RESStep(SingleStepSampler):
         lam_2 = lam + c2_h
         sigma_2 = lam_2.neg().exp()
 
-        denoised2 = ss.model(x_2, sigma_2, model_call_idx=0)
+        denoised2 = ss.model(x_2, sigma_2, model_call_idx=1)
 
         x = math.exp(-h) * x + h * (b1 * denoised + b2 * denoised2)
         return x, sigma_up
@@ -313,7 +315,7 @@ class TrapezoidalStep(SingleStepSampler):
         x_pred = x + d_i * dt
 
         # Denoised sample at the next sigma
-        denoised_next = ss.model(x_pred, ss.sigma_next, model_call_idx=0)
+        denoised_next = ss.model(x_pred, ss.sigma_next, model_call_idx=1)
 
         # Calculate the derivative at the next sigma
         d_next = to_d(x_pred, ss.sigma_next, denoised_next)
@@ -350,7 +352,7 @@ class BogackiStep(ReversibleSingleStepSampler):
             to_d(
                 x + k1 / 2,
                 sigma + dt / 2,
-                ss.model(x + k1 / 2, sigma + dt / 2, model_call_idx=0),
+                ss.model(x + k1 / 2, sigma + dt / 2, model_call_idx=1),
             )
             * dt
         )
@@ -358,7 +360,7 @@ class BogackiStep(ReversibleSingleStepSampler):
             to_d(
                 x + 3 * k1 / 4 + k2 / 4,
                 sigma + 3 * dt / 4,
-                ss.model(x + 3 * k1 / 4 + k2 / 4, sigma + 3 * dt / 4, model_call_idx=1),
+                ss.model(x + 3 * k1 / 4 + k2 / 4, sigma + 3 * dt / 4, model_call_idx=2),
             )
             * dt
         )
@@ -395,7 +397,7 @@ class RK4Step(SingleStepSampler):
             to_d(
                 x + k1 / 2,
                 sigma + dt / 2,
-                ss.model(x + k1 / 2, sigma + dt / 2, model_call_idx=0),
+                ss.model(x + k1 / 2, sigma + dt / 2, model_call_idx=1),
             )
             * dt
         )
@@ -403,7 +405,7 @@ class RK4Step(SingleStepSampler):
             to_d(
                 x + k2 / 2,
                 sigma + dt / 2,
-                ss.model(x + k2 / 2, sigma + dt / 2, model_call_idx=1),
+                ss.model(x + k2 / 2, sigma + dt / 2, model_call_idx=2),
             )
             * dt
         )
@@ -411,7 +413,7 @@ class RK4Step(SingleStepSampler):
             to_d(
                 x + k3,
                 sigma + dt,
-                ss.model(x + k3, sigma + dt, model_call_idx=2),
+                ss.model(x + k3, sigma + dt, model_call_idx=3),
             )
             * dt
         )
@@ -537,7 +539,7 @@ class DPMPPSDEStep(DPMPPStepBase):
         s_ = t_fn(sd)
         x_2 = (sigma_fn(s_) / sigma_fn(t)) * x - (t - s_).expm1() * ss.denoised
         x_2 = x_2 + noise_sampler(sigma_fn(t), sigma_fn(s)) * s_noise * su
-        denoised_2 = ss.model(x_2, sigma_fn(s), model_call_idx=0)
+        denoised_2 = ss.model(x_2, sigma_fn(s), model_call_idx=1)
 
         # Step 2
         sd, su = get_ancestral_step(sigma_fn(t), sigma_fn(t_next), eta)
@@ -568,8 +570,8 @@ class TTMJVPStep(SingleStepSampler):
         h_eta = h * (eta + 1)
 
         eps = to_d(x, sigma, ss.denoised)
-        denoised, denoised_prime = ss.model_jvp(
-            x, sigma, (eps * -sigma, -sigma), model_call_idx=0
+        denoised, denoised_prime = ss.model(
+            x, sigma, tangents=(eps * -sigma, -sigma), model_call_idx=1
         )
 
         phi_1 = -torch.expm1(-h_eta)

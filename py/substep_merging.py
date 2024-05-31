@@ -8,6 +8,7 @@ class MergeSubstepsSampler:
     def __init__(self, ss, samplers, **_kwargs):
         self.ss = ss
         self.samplers = samplers
+        self.substeps = sum(sampler.substeps for sampler in samplers)
 
     def step(self, x):
         raise NotImplementedError
@@ -23,22 +24,24 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
 
     def step(self, x):
         ss = self.ss
-        substeps = len(self.samplers)
+        substeps = self.substeps
         renoise_weight = 1.0 / substeps
         z_avg = torch.zeros_like(x)
         noise = torch.zeros_like(x)
         noise_total = 0.0
-        for subidx, ssampler in enumerate(self.samplers):
-            print("  SUBSTEP", subidx, ssampler.name)
-            ss.denoised = ss.model(x, ss.sigma * ss.s_in)
+        for idx, ssampler in enumerate(
+            sampler for sampler in self.samplers for _ in range(sampler.substeps)
+        ):
+            print(f"  SUBSTEP {idx+1}: {ssampler.name}")
+            ss.denoised = ss.model(x, ss.sigma)
             z_k, noise_strength = ssampler.step(x, ss)
             z_avg += renoise_weight * z_k
-            if ss.sigma_next == 0:
-                continue
             noise_strength *= ssampler.s_noise
+            if ss.sigma_next == 0 or noise_strength == 0:
+                continue
             noise_curr = ssampler.noise_sampler(ss.sigma, ss.sigma_next)
             x = z_k
-            if subidx != substeps - 1:
+            if idx != substeps - 1:
                 x += noise_curr * noise_strength
             noise_total += noise_strength.item() * renoise_weight
             noise += noise_curr * noise_strength
@@ -60,7 +63,7 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
 
     def step(self, x):
         ss = orig_ss = self.ss
-        substeps = len(self.samplers)
+        substeps = self.substeps
         renoise_weight = 1.0 / substeps
         z_avg = torch.zeros_like(x)
         noise = torch.zeros_like(x)
@@ -69,22 +72,26 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
         ss = self.ss.clone_edit(sigma=sig_adj)
         orig_x = x
         x = x + ss.noise_sampler(orig_ss.sigma, ss.sigma_next) * stretch * ss.s_noise
-        ss.denoised = ss.model(x, sig_adj * ss.s_in)
+        ss.denoised = ss.model(x, sig_adj)
         noise_total = 0.0
-        for subidx, ssampler in enumerate(self.samplers):
-            print("  SUBSTEP", subidx, ssampler.name)
-            curr_x = orig_x + scale_noise(
-                ssampler.noise_sampler(sig_adj, ss.sigma_next),
-                ssampler.s_noise * stretch,
+        for idx, ssampler in enumerate(self.samplers):
+            print(
+                f"  SUBSTEP {idx+1} .. {idx+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
             )
-            z_k, noise_strength = ssampler.step(curr_x, ss)
-            z_avg += renoise_weight * z_k
-            if ss.sigma_next == 0:
-                continue
-            noise_strength *= ssampler.s_noise
-            noise_curr = ssampler.noise_sampler(ss.sigma, ss.sigma_next)
-            noise_total += noise_strength.item() * renoise_weight
-            noise += noise_curr * noise_strength
+            for sidx in range(ssampler.substeps):
+                curr_x = orig_x + scale_noise(
+                    ssampler.noise_sampler(sig_adj, ss.sigma_next), stretch
+                )
+                z_k, noise_strength = ssampler.step(curr_x, ss)
+                z_avg += renoise_weight * z_k
+                if ss.sigma_next == 0:
+                    continue
+                noise_strength *= ssampler.s_noise
+                if noise_strength == 0:
+                    continue
+                noise_curr = ssampler.noise_sampler(ss.sigma, ss.sigma_next)
+                noise_total += noise_strength.item() * renoise_weight
+                noise += noise_curr * noise_strength
         ss.dhist.push(ss.denoised)
         ss.denoised = None
         x = self.merge_steps(x, z_avg)
@@ -105,7 +112,7 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
 
     def step(self, x):
         ss = self.ss
-        substeps = len(self.samplers)
+        substeps = self.substeps
         renoise_weight = 1.0 / substeps
         z_avg = torch.zeros_like(x)
         curr_x = x
@@ -113,30 +120,33 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
         stretch = (ss.sigma - ss.sigma_next) * self.stretch
         sig_adj = ss.sigma + stretch
         ss = self.ss.clone_edit(sigma=sig_adj)
-        for subidx, ssampler in enumerate(self.samplers):
-            if subidx == 0 or not self.cache_model:
-                ss.denoised = ss.model(
-                    curr_x,
-                    # + ss.noise_sampler(sig_adj.sigma, ss.sigma_next) * stretch * ss.s_noise,
-                    ss.s_in * sig_adj,
+        for idx, ssampler in enumerate(self.samplers):
+            print(
+                f"  SUBSTEP {idx+1} .. {idx+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
+            )
+            for sidx in range(ssampler.substeps):
+                if idx == 0 or not self.cache_model:
+                    ss.denoised = ss.model(
+                        curr_x,
+                        # + ss.noise_sampler(sig_adj.sigma, ss.sigma_next) * stretch * ss.s_noise,
+                        sig_adj,
+                    )
+                curr_x = (
+                    x
+                    + ssampler.noise_sampler(sig_adj, ss.sigma_next)
+                    * ssampler.s_noise
+                    * stretch
                 )
-            curr_x = (
-                x
-                + ssampler.noise_sampler(sig_adj, ss.sigma_next)
-                * ssampler.s_noise
-                * stretch
-            )
-            print("  SUBSTEP", subidx, ssampler.name, stretch)
-            z_k, noise_strength = ssampler.step(curr_x, ss)
-            z_avg += renoise_weight * z_k
-            curr_x = z_k
-            if not noise_strength or ss.sigma_next == 0:
-                continue
-            curr_x += (
-                ssampler.noise_sampler(ss.sigma, ss.sigma_next)
-                * ssampler.s_noise
-                * noise_strength
-            )
+                z_k, noise_strength = ssampler.step(curr_x, ss)
+                z_avg += renoise_weight * z_k
+                curr_x = z_k
+                if noise_strength == 0 or ss.sigma_next == 0:
+                    continue
+                curr_x += (
+                    ssampler.noise_sampler(ss.sigma, ss.sigma_next)
+                    * ssampler.s_noise
+                    * noise_strength
+                )
         ss.dhist.push(ss.denoised)
         ss.denoised = None
         x = self.merge_steps(curr_x, z_avg)
@@ -145,8 +155,7 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
         return x
 
     def merge_steps(self, x, result):
-        if self.ss.model_call_cache is not None:
-            self.ss.model_call_cache.reset()
+        self.ss.model.reset_cache()
         msampler = self.merge_sampler
         if self.merge_ss is None:
             merge_ss = self.merge_ss = self.ss.clone_edit(
@@ -155,7 +164,7 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
                 xhist=History(x, 2),
                 s_noise=msampler.s_noise,
                 eta=msampler.eta,
-                model_call_cache=None,
+                # model_call_cache=None,
             )
         else:
             merge_ss = self.merge_ss
@@ -186,10 +195,7 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
         super().__init__(ss, samplers, **kwargs)
         self.schedule_multiplier = schedule_multiplier
 
-    def step(self, x):
-        ss = self.ss
-        samplers = self.samplers
-        substeps = len(samplers)
+    def make_schedule(self, ss):
         max_steps = len(self.ss.sigmas) - 1
         sigmas_slice = ss.sigmas[
             ss.idx : min(max_steps + 1, ss.idx + self.schedule_multiplier)
@@ -203,24 +209,30 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
             torch.linspace(
                 sigmas_slice[idx],
                 sigmas_slice[idx + 1],
-                steps=substeps + 1,
+                steps=self.substeps + 1,
                 device=sigmas_slice.device,
                 dtype=sigmas_slice.dtype,
             )[0 if not idx else 1 :]
             for idx in range(len(sigmas_slice) - 1)
         )
         # print("CHUNKS", chunks)
-        subsigmas = torch.cat(chunks)
+        return torch.cat(chunks)
+
+    def step(self, x):
+        ss = self.ss
         # print("SUBSIGMAS", subsigmas)
-        subss = self.ss.clone_edit(idx=0, sigmas=subsigmas)
+        subss = self.ss.clone_edit(idx=0, sigmas=self.make_schedule(ss))
         subss.main_idx = ss.idx
         subss.main_sigmas = ss.sigmas
-        for subidx in range(substeps):
-            subss.update(subidx)
+
+        for idx, ssampler in enumerate(
+            sampler for sampler in self.samplers for _ in range(sampler.substeps)
+        ):
+            print(f"  SUBSTEP {idx+1}: {ssampler.name}")
+            subss.update(idx)
             subss.denoised = subss.model(x, subss.sigma)
-            ssampler = samplers[subidx]
             x, noise_strength = ssampler.step(x, subss)
-            if not noise_strength or subss.sigma_next == 0:
+            if noise_strength == 0 or subss.sigma_next == 0:
                 continue
             x = (
                 x
