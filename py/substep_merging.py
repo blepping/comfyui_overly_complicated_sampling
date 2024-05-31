@@ -124,13 +124,13 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
             print(
                 f"  SUBSTEP {idx+1} .. {idx+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
             )
+            if idx == 0 or not self.cache_model:
+                ss.denoised = ss.model(
+                    curr_x,
+                    # + ss.noise_sampler(sig_adj.sigma, ss.sigma_next) * stretch * ss.s_noise,
+                    sig_adj,
+                )
             for sidx in range(ssampler.substeps):
-                if idx == 0 or not self.cache_model:
-                    ss.denoised = ss.model(
-                        curr_x,
-                        # + ss.noise_sampler(sig_adj.sigma, ss.sigma_next) * stretch * ss.s_noise,
-                        sig_adj,
-                    )
                 curr_x = (
                     x
                     + ssampler.noise_sampler(sig_adj, ss.sigma_next)
