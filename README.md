@@ -48,18 +48,20 @@ dyn_deta_mode: "deta"
 #### General
 
 * `eta`(`1.0`): Will override `eta` in the node if set.
+* `dyn_eta_start`(`unset`) and `dyn_eta_end`(`unset`): No effect unless both values are set. Will interpolate between start and end based on the percentage of sampling. *Note*: This is a factor applied to ETA, not a flat value.
 * `s_noise`(`1.0`): Will override `s_noise` in the node if set.
 * `solver_type`(`midpoint`): Applies to DPM++ 2m SDE. May be one of `midpoint` or `heun` (`midpoint` is generally recommended).
 
 #### Reversible
 
 * `reta`(`1.0`): Reverse ETA.
+* `dyn_reta_start`(`unset`) and `dyn_reta_end`(`unset`): No effect unless both values are set. Will interpolate between start and end based on the percentage of sampling. *Note*: This is a factor applied to RETA, not a flat value.
 
 #### Dancing
 
 * `leap`(`2`): Distance to try to leap forward. If you set `leap` to `1` you just get plain old Euler ancestral.
 * `deta`(`1.0`): ETA used for dance steps.
-* `dyn_deta_start`(`unset`) and `dyn_deta_end`(`unset`): No effect unless both values are set. Will interpolate between start and end based on the percentage of sampling.
+* `dyn_deta_start`(`unset`) and `dyn_deta_end`(`unset`): No effect unless both values are set. Will interpolate between start and end based on the percentage of sampling. *Note*: This is a factor applied to DETA, not a flat value.
 * `dyn_deta_mode`(`lerp`): May be one of:
     * `deta`: Scales `deta` based on the value from `dyn_deta_start/end`.
     * `lerp`: Does the dance step according to `deta` and then LERPs the non-dance sample result with the dance sample result based on the scale calculated from `dyn_deta_start/end` (which is `1.0` if they are unset). For example, if the dance scale is `0.5` you will get 50% normal sampling, 50% dancing sampling.

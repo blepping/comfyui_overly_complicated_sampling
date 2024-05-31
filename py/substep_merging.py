@@ -29,7 +29,7 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
         noise = torch.zeros_like(x)
         noise_total = 0.0
         for subidx, ssampler in enumerate(self.samplers):
-            print("  SUBSTEP", subidx, ssampler)
+            print("  SUBSTEP", subidx, ssampler.name)
             ss.denoised = ss.model(x, ss.sigma * ss.s_in)
             z_k, noise_strength = ssampler.step(x, ss)
             z_avg += renoise_weight * z_k
@@ -72,7 +72,7 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
         ss.denoised = ss.model(x, sig_adj * ss.s_in)
         noise_total = 0.0
         for subidx, ssampler in enumerate(self.samplers):
-            print("  SUBSTEP", subidx, ssampler)
+            print("  SUBSTEP", subidx, ssampler.name)
             curr_x = orig_x + scale_noise(
                 ssampler.noise_sampler(sig_adj, ss.sigma_next),
                 ssampler.s_noise * stretch,
@@ -126,7 +126,7 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
                 * ssampler.s_noise
                 * stretch
             )
-            print("  SUBSTEP", subidx, ssampler, stretch)
+            print("  SUBSTEP", subidx, ssampler.name, stretch)
             z_k, noise_strength = ssampler.step(curr_x, ss)
             z_avg += renoise_weight * z_k
             curr_x = z_k
@@ -194,11 +194,11 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
         sigmas_slice = ss.sigmas[
             ss.idx : min(max_steps + 1, ss.idx + self.schedule_multiplier)
         ]
-        print("SLICE", sigmas_slice)
+        # print("SLICE", sigmas_slice)
         unsorted_idx = find_first_unsorted(sigmas_slice)
         if unsorted_idx is not None:
             sigmas_slice = sigmas_slice[:unsorted_idx]
-        print("SLICE ADJ", sigmas_slice)
+        # print("SLICE ADJ", sigmas_slice)
         chunks = tuple(
             torch.linspace(
                 sigmas_slice[idx],
@@ -209,9 +209,9 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
             )[0 if not idx else 1 :]
             for idx in range(len(sigmas_slice) - 1)
         )
-        print("CHUNKS", chunks)
+        # print("CHUNKS", chunks)
         subsigmas = torch.cat(chunks)
-        print("SUBSIGMAS", subsigmas)
+        # print("SUBSIGMAS", subsigmas)
         subss = self.ss.clone_edit(idx=0, sigmas=subsigmas)
         subss.main_idx = ss.idx
         subss.main_sigmas = ss.sigmas

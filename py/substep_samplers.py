@@ -15,10 +15,20 @@ class SingleStepSampler:
     name = None
 
     def __init__(
-        self, *, noise_sampler=None, s_noise=1.0, eta=1.0, weight=1.0, **kwargs
+        self,
+        *,
+        noise_sampler=None,
+        s_noise=1.0,
+        eta=1.0,
+        dyn_eta_start=None,
+        dyn_eta_end=None,
+        weight=1.0,
+        **kwargs,
     ):
         self.s_noise = s_noise
         self.eta = eta
+        self.dyn_eta_start = dyn_eta_start
+        self.dyn_eta_end = dyn_eta_end
         self.noise_sampler = noise_sampler
         self.weight = weight
         self.kwargs = kwargs
@@ -28,19 +38,40 @@ class SingleStepSampler:
 
     # Euler - based on original ComfyUI implementation
     def euler_step(self, x, ss):
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
         d = to_d(x, ss.sigma, ss.denoised)
         dt = sigma_down - ss.sigma
         return x + d * dt, sigma_up
 
     def __str__(self):
-        return f"<SS({self.name}): s_noise={self.s_noise}, eta={self.eta}, kwargs={self.kwargs}>"
+        return f"<SS({self.name}): s_noise={self.s_noise}, eta={self.eta}>"
+
+    def get_dyn_value(self, ss, start, end):
+        if None in (start, end):
+            return 1.0
+        if start == end:
+            return start
+        main_idx = getattr(ss, "main_idx", ss.idx)
+        main_sigmas = getattr(ss, "main_sigmas", ss.sigmas)
+        step_pct = main_idx / (len(main_sigmas) - 1)
+        dd_diff = end - start
+        return start + dd_diff * step_pct
+
+    def get_dyn_eta(self, ss):
+        return self.eta * self.get_dyn_value(ss, self.dyn_eta_start, self.dyn_eta_end)
 
 
 class ReversibleSingleStepSampler(SingleStepSampler):
-    def __init__(self, *, reta=1.0, **kwargs):
+    def __init__(self, *, reta=1.0, dyn_reta_start=None, dyn_reta_end=None, **kwargs):
         super().__init__(**kwargs)
         self.reta = reta
+        self.dyn_reta_start = dyn_reta_start
+        self.dyn_reta_end = dyn_reta_end
+
+    def get_dyn_reta(self, ss):
+        return self.reta * self.get_dyn_value(
+            ss, self.dyn_reta_start, self.dyn_reta_end
+        )
 
 
 class EulerStep(SingleStepSampler):
@@ -90,7 +121,7 @@ class DPMPP2MSDEStep(SingleStepSampler):
         # DPM-Solver++(2M) SDE
         t, s = -ss.sigma.log(), -ss.sigma_next.log()
         h = s - t
-        eta_h = self.eta * h
+        eta_h = self.get_dyn_eta(ss) * h
 
         x = (
             ss.sigma_next / ss.sigma * (-eta_h).exp() * x
@@ -126,10 +157,11 @@ class DPMPP3MSDEStep(SingleStepSampler):
             return denoised, 0
         t, s = -ss.sigma.log(), -ss.sigma_next.log()
         h = s - t
-        h_eta = h * (self.eta + 1)
+        eta = self.get_dyn_eta(ss)
+        h_eta = h * (eta + 1)
 
         x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
-        noise_strength = ss.sigma_next * (-2 * h * self.eta).expm1().neg().sqrt()
+        noise_strength = ss.sigma_next * (-2 * h * eta).expm1().neg().sqrt()
         if len(ss.dhist) == 0 or ss.sigma_prev is None:
             return x, noise_strength
         h_1 = (-ss.sigma.log()) - (-ss.sigma_prev.log())
@@ -161,8 +193,10 @@ class ReversibleHeunStep(ReversibleSingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
-        sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(self.reta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
+        sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(
+            self.get_dyn_reta(ss)
+        )
         dt = sigma_down - ss.sigma
         dt_reversible = sigma_down_reversible - ss.sigma
 
@@ -191,8 +225,10 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
         # Reversible Heun-inspired update (first-order)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
-        sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(self.reta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
+        sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(
+            self.get_dyn_reta(ss)
+        )
         sigma_i, sigma_i_plus_1 = ss.sigma, sigma_down
         dt = sigma_i_plus_1 - sigma_i
         dt_reversible = sigma_down_reversible - sigma_i
@@ -200,7 +236,6 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
         eff_x = ss.xhist[-1] if len(ss.xhist) else x
 
         # Calculate the derivative using the model
-        print("Can skip", len(ss.dhist))
         d_i_old = to_d(
             eff_x,
             sigma_i,
@@ -237,11 +272,10 @@ class RESStep(SingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        eta = self.get_dyn_eta(ss)
+        sigma_down, sigma_up = ss.get_ancestral_step(eta)
         denoised = ss.denoised
-        lam_next = (
-            sigma_down.log().neg() if self.eta != 0 else ss.sigma_next.log().neg()
-        )
+        lam_next = sigma_down.log().neg() if eta != 0 else ss.sigma_next.log().neg()
         lam = ss.sigma.log().neg()
 
         h = lam_next - lam
@@ -268,7 +302,7 @@ class TrapezoidalStep(SingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
         dt = ss.sigma_next - ss.sigma
         denoised = ss.denoised
 
@@ -298,8 +332,10 @@ class BogackiStep(ReversibleSingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
-        sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(self.reta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
+        sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(
+            self.get_dyn_reta(ss)
+        )
         sigma, sigma_next = ss.sigma, sigma_down
         dt = sigma_next - sigma
         dt_reversible = sigma_down_reversible - sigma
@@ -347,7 +383,7 @@ class RK4Step(SingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
         sigma = ss.sigma
         # Calculate the derivative using the model
         d = to_d(x, sigma, ss.denoised)
@@ -411,6 +447,7 @@ class EulerDancingStep(SingleStepSampler):
         self.dyn_deta_mode = dyn_deta_mode
 
     def step(self, x, ss):
+        eta = self.get_dyn_eta(ss)
         leap_sigmas = ss.sigmas[ss.idx :]
         leap_sigmas = leap_sigmas[: find_first_unsorted(leap_sigmas)]
         zero_idx = (leap_sigmas <= 0).nonzero().flatten()[:1]
@@ -420,29 +457,18 @@ class EulerDancingStep(SingleStepSampler):
         sigma_leap = leap_sigmas[curr_leap] if is_danceable else ss.sigma_next
         print("DANCE", max_leap, curr_leap, sigma_leap, "--", leap_sigmas)
         del leap_sigmas
-        sigma_down, sigma_up = get_ancestral_step(ss.sigma, sigma_leap, self.eta)
+        sigma_down, sigma_up = get_ancestral_step(ss.sigma, sigma_leap, eta)
         d = to_d(x, ss.sigma, ss.denoised)
         # Euler method
         dt = sigma_down - ss.sigma
         x = x + d * dt
         if curr_leap == 1:
             return x, sigma_up
-        if None not in (self.dyn_deta_start, self.dyn_deta_end):
-            if self.dyn_deta_start == self.dyn_deta_end:
-                dance_scale = self.dyn_deta_start
-            else:
-                main_idx = getattr(ss, "main_idx", ss.idx)
-                main_sigmas = getattr(ss, "main_sigmas", ss.sigmas)
-                step_pct = main_idx / (len(main_sigmas) - 1)
-                dd_diff = self.dyn_deta_end - self.dyn_deta_start
-                dance_scale = self.dyn_deta_start + dd_diff * step_pct
-        else:
-            dance_scale = 1.0
-        print("DANCE?", dance_scale, ss.idx, is_danceable, curr_leap)
+        dance_scale = self.get_dyn_value(ss, self.dyn_deta_start, self.dyn_deta_end)
         if not is_danceable or abs(dance_scale) < 1e-04:
             return x, sigma_up
         sigma_down_normal, sigma_up_normal = get_ancestral_step(
-            ss.sigma, ss.sigma_next, self.eta
+            ss.sigma, ss.sigma_next, eta
         )
         if self.dyn_deta_mode == "lerp":
             dt_normal = sigma_down_normal - ss.sigma
@@ -460,13 +486,6 @@ class EulerDancingStep(SingleStepSampler):
         result = x + d_2 * dt_2
         noise_diff = sigma_up2 - sigma_up * dance_scale
         noise_scale = sigma_up2 + noise_diff * (0.025 * curr_leap)
-        print(
-            "DANCE NOISE",
-            noise_scale,
-            "--",
-            sigma_up_normal,
-            sigma_up_normal - noise_scale,
-        )
         if self.dyn_deta_mode == "deta" or dance_scale == 1.0:
             return result, noise_scale
         result = torch.lerp(x_normal, result, dance_scale)
@@ -481,7 +500,7 @@ class DPMPP2SStep(DPMPPStepBase):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
         t_fn, sigma_fn = self.t_fn, self.sigma_fn
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
         # DPM-Solver++(2S)
         t, t_next = t_fn(ss.sigma), t_fn(sigma_down)
         r = 1 / 2
@@ -504,9 +523,9 @@ class DPMPPSDEStep(DPMPPStepBase):
         if ss.sigma_next == 0:
             return self.euler_step(x, ss)
         t_fn, sigma_fn = self.t_fn, self.sigma_fn
-        r, eta, s_noise = self.r, self.eta, self.s_noise
+        r, eta, s_noise = self.r, self.get_dyn_eta(ss), self.s_noise
         noise_sampler = self.noise_sampler
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        sigma_down, sigma_up = ss.get_ancestral_step(eta)
         # DPM-Solver++
         t, t_next = t_fn(ss.sigma), t_fn(ss.sigma_next)
         h = t_next - t
@@ -540,12 +559,13 @@ class TTMJVPStep(SingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return ss.denoised, ss.sigma.new_zeros(1)
-        sigma_down, sigma_up = ss.get_ancestral_step(self.eta)
+        eta = self.get_dyn_eta(ss)
+        sigma_down, sigma_up = ss.get_ancestral_step(eta)
         sigma, sigma_next = ss.sigma, ss.sigma_next
         # 2nd order truncated Taylor method
         t, s = -sigma.log(), -sigma_next.log()
         h = s - t
-        h_eta = h * (self.eta + 1)
+        h_eta = h * (eta + 1)
 
         eps = to_d(x, sigma, ss.denoised)
         denoised, denoised_prime = ss.model_jvp(
@@ -559,10 +579,10 @@ class TTMJVPStep(SingleStepSampler):
             phi_2 = torch.expm1(-h_eta) + h_eta
         x = torch.exp(-h_eta) * x + phi_1 * ss.denoised + phi_2 * denoised_prime
 
-        if not self.eta:
+        if not eta:
             return x, ss.sigma.new_zeros(1)
 
-        phi_1_noise = torch.sqrt(-torch.expm1(-2 * h * self.eta))
+        phi_1_noise = torch.sqrt(-torch.expm1(-2 * h * eta))
         return x, sigma_next * phi_1_noise
 
 
