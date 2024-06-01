@@ -74,9 +74,10 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
         x = x + ss.noise_sampler(orig_ss.sigma, ss.sigma_next) * stretch * ss.s_noise
         ss.denoised = ss.model(x, sig_adj)
         noise_total = 0.0
+        step = 0
         for idx, ssampler in enumerate(self.samplers):
             print(
-                f"  SUBSTEP {idx+1} .. {idx+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
+                f"  SUBSTEP {step+1} .. {step+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
             )
             for sidx in range(ssampler.substeps):
                 curr_x = orig_x + scale_noise(
@@ -92,6 +93,7 @@ class AverageMergeSubstepsSampler(NormalMergeSubstepsSampler):
                 noise_curr = ssampler.noise_sampler(ss.sigma, ss.sigma_next)
                 noise_total += noise_strength.item() * renoise_weight
                 noise += noise_curr * noise_strength
+            step += ssampler.substeps
         ss.dhist.push(ss.denoised)
         ss.denoised = None
         x = self.merge_steps(x, z_avg)
@@ -120,9 +122,10 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
         stretch = (ss.sigma - ss.sigma_next) * self.stretch
         sig_adj = ss.sigma + stretch
         ss = self.ss.clone_edit(sigma=sig_adj)
+        step = 0
         for idx, ssampler in enumerate(self.samplers):
             print(
-                f"  SUBSTEP {idx+1} .. {idx+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
+                f"  SUBSTEP {step+1} .. {step+ssampler.substeps}: {ssampler.name}, stretch={stretch}"
             )
             if idx == 0 or not self.cache_model:
                 ss.denoised = ss.model(
@@ -147,6 +150,7 @@ class SampleMergeSubstepsSampler(AverageMergeSubstepsSampler):
                     * ssampler.s_noise
                     * noise_strength
                 )
+            step += ssampler.substeps
         ss.dhist.push(ss.denoised)
         ss.denoised = None
         x = self.merge_steps(curr_x, z_avg)
