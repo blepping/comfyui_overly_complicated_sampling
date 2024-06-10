@@ -2,8 +2,7 @@ import torch
 from tqdm.auto import trange
 
 
-from .substep_samplers import STEP_SAMPLERS
-from .substep_sampling import SamplerState, History, ModelCallCache
+from .substep_sampling import SamplerState, History, ModelCallCache, NoiseSamplerCache
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 
 
@@ -29,35 +28,6 @@ def composable_sampler(
         def noise_sampler(_s, _sn):
             return torch.randn_like(x)
 
-    samplers = []
-    substeps = 0
-    for sitem in copts["chain"].items:
-        custom_noise = sitem.get("custom_noise_opt")
-        if custom_noise is None:
-            curr_ns = noise_sampler
-        else:
-            curr_ns = custom_noise.make_noise_sampler(
-                x, sigmas[-1], sigmas[0], normalized=True
-            )
-        ssampler = STEP_SAMPLERS[sitem["step_method"]](noise_sampler=curr_ns, **sitem)
-        samplers.append(ssampler)
-        # samplers += (ssampler,) * sitem["substeps"]
-        substeps += ssampler.substeps
-    msitem = copts["merge_sampler"]
-    if copts["merge_method"] in ("sample", "sample_uncached"):
-        custom_noise = msitem.get("custom_noise_opt")
-        if custom_noise is None:
-            curr_ns = noise_sampler
-        else:
-            curr_ns = custom_noise.make_noise_sampler(
-                x, sigmas[-1], sigmas[0], normalized=True
-            )
-        merge_sampler = STEP_SAMPLERS[msitem["step_method"]](
-            noise_sampler=curr_ns, **msitem
-        )
-        pass
-    else:
-        merge_sampler = None
     ss = SamplerState(
         ModelCallCache(
             model,
@@ -79,14 +49,30 @@ def composable_sampler(
         s_noise=s_noise if s_noise != 1.0 else copts["s_noise"],
         reta=copts.get("reta", 1.0),
     )
-    merge_sampler = MERGE_SUBSTEPS_CLASSES[copts["merge_method"]](
-        ss,
-        samplers,
-        **(copts | {"merge_sampler": merge_sampler}),
+    groups = copts["_groups"]
+    merge_samplers = tuple(
+        MERGE_SUBSTEPS_CLASSES[g.merge_method](ss, g.items, **g.options)
+        for g in groups.items
     )
-    for idx in trange(len(sigmas) - 1, disable=disable):
-        print(f"STEP {idx+1}")
+    nsc = NoiseSamplerCache(
+        x,
+        extra_args.get("seed", 42),
+        sigmas[-1],
+        sigmas[0],
+        **copts.get("noise", {}),
+    )
+    ss.noise = nsc
+    step_count = len(sigmas) - 1
+    for idx in trange(step_count, disable=disable):
+        print(f"STEP {idx + 1}")
         ss.update(idx)
         ss.model.reset_cache()
+        nsc.update_x(x)
+        ms_idx = groups.find_match(ss.sigma, idx, step_count)
+        if ms_idx is None:
+            raise RuntimeError(f"No matching sampler group for step {idx + 1}")
+        merge_sampler = merge_samplers[ms_idx]
         x = merge_sampler.step(x)
+        if (idx + 1) % nsc.cache_reset_interval == 0:
+            nsc.reset_cache()
     return x
