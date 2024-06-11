@@ -1,4 +1,3 @@
-import math
 import torch
 
 
@@ -7,7 +6,6 @@ def scale_noise(
     factor=1.0,
     *,
     normalized=True,
-    threshold_std_devs=2.5,
     normalize_dims=(-3, -2, -1),
 ):
     if not normalized or noise.numel() == 0:
@@ -16,28 +14,7 @@ def scale_noise(
         noise.mean(dim=normalize_dims, keepdim=True),
         noise.std(dim=normalize_dims, keepdim=True),
     )
-    # threshold = threshold_std_devs / math.sqrt(noise.numel())
-    # noise[mean.abs() > threshold] -= mean
-    # noise[(1.0 - std).abs() > threshold] /= std
-    noise -= mean
-    noise /= std
-    # if abs(mean) > threshold:
-    #     noise -= mean
-    # if abs(1.0 - std) > threshold:
-    #     noise /= std
-    return noise.mul_(factor) if factor != 1 else noise
-
-
-# def scale_noise(noise, factor=1.0, *, normalized=True, threshold_std_devs=2.5):
-#     if not normalized or noise.numel() == 0:
-#         return noise.mul_(factor) if factor != 1 else noise
-#     mean, std = noise.mean().item(), noise.std().item()
-#     threshold = threshold_std_devs / math.sqrt(noise.numel())
-#     if abs(mean) > threshold:
-#         noise -= mean
-#     if abs(1.0 - std) > threshold:
-#         noise /= std
-#     return noise.mul_(factor) if factor != 1 else noise
+    return noise.sub_(mean).div_(std).mul_(factor)
 
 
 def find_first_unsorted(tensor, desc=True):

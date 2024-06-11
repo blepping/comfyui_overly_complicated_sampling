@@ -1,7 +1,10 @@
 import gc
+import random
 import torch
 
 from comfy.k_diffusion.sampling import get_ancestral_step
+
+from .utils import scale_noise
 
 
 class Items:
@@ -150,8 +153,6 @@ class NoiseSamplerCache:
         self.normalize_dims = tuple(int(v) for v in normalize_dims)
         self.update_x(x)
         if set_seed:
-            import random
-
             random.seed(seed)
             torch.manual_seed(seed)
 
@@ -164,13 +165,9 @@ class NoiseSamplerCache:
         normalize_dims = (
             self.normalize_dims if normalize_dims is None else normalize_dims
         )
-        if not normalized or not noise.numel():
-            return noise.mul_(factor * self.scale)
-        mean, std = (
-            noise.mean(dim=normalize_dims, keepdim=True),
-            noise.std(dim=normalize_dims, keepdim=True),
+        return scale_noise(
+            noise, factor, normalized=normalized, normalize_dims=normalize_dims
         )
-        return noise.sub_(mean).div_(std).mul_(factor * self.scale)
 
     def update_x(self, x):
         if self.x.shape == x.shape and self.mega_x is not None:
@@ -318,6 +315,7 @@ class SamplerState:
         xhist,
         extra_args,
         *,
+        step=0,
         noise_sampler,
         callback=None,
         denoised=None,
@@ -340,7 +338,7 @@ class SamplerState:
         self.noise = noise
         self.update(idx)
 
-    def update(self, idx=None):
+    def update(self, idx=None, step=None):
         idx = self.idx if idx is None else idx
         self.idx = idx
         self.sigma_prev = None if idx < 1 else self.sigmas[idx - 1]
@@ -354,6 +352,8 @@ class SamplerState:
         self.sigma_down_reversible, self.sigma_up_reversible = get_ancestral_step(
             self.sigma, self.sigma_next, eta=self.reta
         )
+        if step is not None:
+            self.step = step
 
     def get_ancestral_step(self, eta=1.0):
         return get_ancestral_step(self.sigma, self.sigma_next, eta=eta)
@@ -374,6 +374,7 @@ class SamplerState:
             "noise_sampler",
             "noise",
             "idx",
+            "step",
             "sigma",
             "sigma_next",
             "sigma_prev",
@@ -391,7 +392,7 @@ class SamplerState:
             return None
         return self.callback_({
             "x": x,
-            "i": self.idx,
+            "i": self.step,
             "sigma": self.sigma,
             "sigma_hat": self.sigma,
             "denoised": self.dhist[-1],

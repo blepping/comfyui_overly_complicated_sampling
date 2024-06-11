@@ -205,6 +205,7 @@ class CSamplerParam:
     CPARAM_TYPES = {
         "custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
         "merge_sampler": lambda v: isinstance(v, StepSamplerChain),
+        "restart_custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
     }
 
     @classmethod
