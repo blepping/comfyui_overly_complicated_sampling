@@ -13,9 +13,9 @@ eta: 1.0
 """
 
 
-class ComposableSampler:
+class SamplerNode:
     RETURN_TYPES = ("SAMPLER",)
-    CATEGORY = "sampling/custom_sampling/samplers"
+    CATEGORY = "sampling/custom_sampling/OCS"
 
     FUNCTION = "go"
 
@@ -23,10 +23,10 @@ class ComposableSampler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "step_sampler_groups": ("STEP_SAMPLER_GROUPS",),
+                "groups": ("OCS_GROUPS",),
             },
             "optional": {
-                "csampler_params_opt": ("CSAMPLER_PARAMS",),
+                "params_opt": ("OCS_PARAMS",),
                 "parameters": (
                     "STRING",
                     {
@@ -41,8 +41,8 @@ class ComposableSampler:
     def go(
         self,
         *,
-        step_sampler_groups,
-        csampler_params_opt=None,
+        groups,
+        params_opt=None,
         parameters="",
     ):
         options = {}
@@ -53,20 +53,19 @@ class ComposableSampler:
                 if not isinstance(extra_params, dict):
                     raise ValueError("Parameters must be a JSON or YAML object")
                 options |= extra_params
-        if csampler_params_opt is not None:
-            options |= csampler_params_opt.items
-        options["_groups"] = step_sampler_groups.clone()
+        if params_opt is not None:
+            options |= params_opt.items
+        options["_groups"] = groups.clone()
         return (
             comfy.samplers.KSAMPLER(
-                composable_sampler,
-                {"composable_sampler_options": options},
+                composable_sampler, {"overly_complicated_options": options}
             ),
         )
 
 
-class SubstepsGroup:
-    RETURN_TYPES = ("STEP_SAMPLER_GROUPS",)
-    CATEGORY = "sampling/custom_sampling/samplers"
+class GroupNode:
+    RETURN_TYPES = ("OCS_GROUPS",)
+    CATEGORY = "sampling/custom_sampling/OCS"
 
     FUNCTION = "go"
 
@@ -84,11 +83,11 @@ class SubstepsGroup:
                     "FLOAT",
                     {"default": 999, "min": 0.0, "step": 0.1, "round'": False},
                 ),
-                "step_sampler_chain": ("STEP_SAMPLER_CHAIN",),
+                "substeps": ("OCS_SUBSTEPS",),
             },
             "optional": {
-                "step_sampler_groups_opt": ("STEP_SAMPLER_GROUPS",),
-                "csampler_params_opt": ("CSAMPLER_PARAMS",),
+                "groups_opt": ("OCS_GROUPS",),
+                "params_opt": ("OCS_PARAMS",),
                 "parameters": (
                     "STRING",
                     {
@@ -107,17 +106,13 @@ class SubstepsGroup:
         time_mode,
         time_start,
         time_end,
-        step_sampler_chain,
-        step_sampler_group_opt=None,
-        csampler_params_opt=None,
+        substeps,
+        groups_opt=None,
+        params_opt=None,
         parameters="",
     ):
-        group = (
-            StepSamplerGroups()
-            if step_sampler_group_opt is None
-            else step_sampler_group_opt
-        )
-        chain = step_sampler_chain.clone()
+        group = StepSamplerGroups() if groups_opt is None else groups_opt
+        chain = substeps.clone()
         chain.merge_method = merge_method
         chain.time_mode = time_mode
         chain.time_start, chain.time_end = time_start, time_end
@@ -129,16 +124,16 @@ class SubstepsGroup:
                 if not isinstance(extra_params, dict):
                     raise ValueError("Parameters must be a JSON or YAML object")
                 options |= extra_params
-        if csampler_params_opt is not None:
-            options |= csampler_params_opt.items
+        if params_opt is not None:
+            options |= params_opt.items
         chain.options |= options
         group.append(chain)
         return (group,)
 
 
-class ComposableStepSampler:
-    RETURN_TYPES = ("STEP_SAMPLER_CHAIN",)
-    CATEGORY = "sampling/custom_sampling/samplers"
+class SubstepsNode:
+    RETURN_TYPES = ("OCS_SUBSTEPS",)
+    CATEGORY = "sampling/custom_sampling/OCS"
 
     FUNCTION = "go"
 
@@ -150,8 +145,8 @@ class ComposableStepSampler:
                 "step_method": (tuple(STEP_SAMPLERS.keys()),),
             },
             "optional": {
-                "step_sampler_opt": ("STEP_SAMPLER_CHAIN",),
-                "csampler_params_opt": ("CSAMPLER_PARAMS",),
+                "substeps_opt": ("OCS_SUBSTEPS",),
+                "params_opt": ("OCS_PARAMS",),
                 "parameters": (
                     "STRING",
                     {
@@ -167,12 +162,12 @@ class ComposableStepSampler:
         self,
         *,
         parameters="",
-        step_sampler_opt=None,
-        csampler_params_opt=None,
+        substeps_opt=None,
+        params_opt=None,
         **kwargs,
     ):
-        if step_sampler_opt is not None:
-            chain = step_sampler_opt.clone()
+        if substeps_opt is not None:
+            chain = substeps_opt.clone()
         else:
             chain = StepSamplerChain()
         parameters = parameters.strip()
@@ -182,8 +177,8 @@ class ComposableStepSampler:
                 if not isinstance(extra_params, dict):
                     raise ValueError("Parameters must be a JSON or YAML object")
                 kwargs |= extra_params
-        if csampler_params_opt is not None:
-            kwargs |= csampler_params_opt.items
+        if params_opt is not None:
+            kwargs |= params_opt.items
         chain.append(kwargs)
         return (chain,)
 
@@ -195,14 +190,14 @@ class Wildcard(str):
         return False
 
 
-class CSamplerParam:
-    RETURN_TYPES = ("CSAMPLER_PARAMS",)
-    CATEGORY = "sampling/custom_sampling/samplers"
+class ParamNode:
+    RETURN_TYPES = ("OCS_PARAMS",)
+    CATEGORY = "sampling/custom_sampling/OCS"
     FUNCTION = "go"
 
     WC = Wildcard("*")
 
-    CPARAM_TYPES = {
+    OCS_PARAM_TYPES = {
         "custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
         "merge_sampler": lambda v: isinstance(v, StepSamplerChain),
         "restart_custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
@@ -211,62 +206,67 @@ class CSamplerParam:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"key": (tuple(cls.CPARAM_TYPES.keys()),), "value": (cls.WC,)},
-            "optional": {"csampler_params_opt": ("CSAMPLER_PARAMS",)},
+            "required": {
+                "key": (tuple(cls.OCS_PARAM_TYPES.keys()),),
+                "value": (cls.WC,),
+            },
+            "optional": {"params_opt": ("OCS_PARAMS",)},
         }
 
-    def go(self, *, key, value, csampler_params_opt=None):
-        if not self.CPARAM_TYPES[key](value):
+    def go(self, *, key, value, params_opt=None):
+        if not self.OCS_PARAM_TYPES[key](value):
             raise ValueError(f"CSamplerParam: Bad value type for key {key}")
-        params = (
-            ParamGroup(items={})
-            if csampler_params_opt is None
-            else csampler_params_opt.clone()
-        )
+        params = ParamGroup(items={}) if params_opt is None else params_opt.clone()
         params[key] = value
         return (params,)
 
 
-class CSamplerParamMulti:
-    RETURN_TYPES = ("CSAMPLER_PARAMS",)
-    CATEGORY = "sampling/custom_sampling/samplers"
+class MultiParamNode:
+    RETURN_TYPES = ("OCS_PARAMS",)
+    CATEGORY = "sampling/custom_sampling/OCS"
     FUNCTION = "go"
 
     PARAM_COUNT = 5
 
     @classmethod
     def INPUT_TYPES(cls):
-        param_keys = (("", *CSamplerParam.CPARAM_TYPES.keys()),)
+        param_keys = (("", *ParamNode.OCS_PARAM_TYPES.keys()),)
         return {
             "required": {
                 f"key_{idx}": param_keys for idx in range(1, cls.PARAM_COUNT + 1)
             },
-            "optional": {"csampler_params_opt": ("CSAMPLER_PARAMS",)}
+            "optional": {"params_opt": ("OCS_PARAMS",)}
             | {
-                f"value_opt_{idx}": (CSamplerParam.WC,)
+                f"value_opt_{idx}": (ParamNode.WC,)
                 for idx in range(1, cls.PARAM_COUNT + 1)
             },
         }
 
-    def go(self, *, csampler_params_opt=None, **kwargs):
-        params = (
-            ParamGroup(items={})
-            if csampler_params_opt is None
-            else csampler_params_opt.clone()
-        )
+    def go(self, *, params_opt=None, **kwargs):
+        params = ParamGroup(items={}) if params_opt is None else params_opt.clone()
         for idx in range(1, self.PARAM_COUNT + 1):
             key, value = kwargs.get(f"key_{idx}"), kwargs.get(f"value_opt_{idx}")
             if not key or value is None:
                 continue
-            if not CSamplerParam.CPARAM_TYPES[key](value):
+            if not ParamNode.OCS_PARAM_TYPES[key](value):
                 raise ValueError(f"CSamplerParamGroup: Bad value type for key {key}")
             params[key] = value
         return (params,)
 
 
+class SimpleRestartSchedule:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"sigmas": ("SIGMAS",)},
+            "optional": {"segments": ("STRING", {"default": "10+4x2"})},
+        }
+
+
 __all__ = (
-    "ComposableStepSampler",
-    "ComposableSampler",
-    "CSamplerParam",
-    "CSamplerParamMulti",
+    "SamplerNode",
+    "GroupNode",
+    "SubstepsNode",
+    "ParamNode",
+    "MultiParamNode",
 )

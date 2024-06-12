@@ -343,14 +343,8 @@ class SamplerState:
         self.idx = idx
         self.sigma_prev = None if idx < 1 else self.sigmas[idx - 1]
         self.sigma, self.sigma_next = self.sigmas[idx], self.sigmas[idx + 1]
-        if self.sigma_prev is not None and self.sigma >= self.sigma_prev:
-            self.dhist.reset()
-            self.xhist.reset()
         self.sigma_down, self.sigma_up = get_ancestral_step(
             self.sigma, self.sigma_next, eta=self.eta
-        )
-        self.sigma_down_reversible, self.sigma_up_reversible = get_ancestral_step(
-            self.sigma, self.sigma_next, eta=self.reta
         )
         if step is not None:
             self.step = step
@@ -380,8 +374,6 @@ class SamplerState:
             "sigma_prev",
             "sigma_down",
             "sigma_up",
-            "sigma_down_reversible",
-            "sigma_up_reversible",
         ):
             setattr(obj, k, kwargs[k] if k in kwargs else getattr(self, k))
         obj.update()

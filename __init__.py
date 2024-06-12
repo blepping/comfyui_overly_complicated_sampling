@@ -2,10 +2,10 @@ from .py import nodes
 
 
 NODE_CLASS_MAPPINGS = {
-    "ComposableSampler": nodes.ComposableSampler,
-    "ComposableStepSampler": nodes.ComposableStepSampler,
-    "SubstepsGroup": nodes.SubstepsGroup,
-    "CSamplerParam": nodes.CSamplerParam,
-    "CSamplerParamMulti": nodes.CSamplerParamMulti,
+    "OCS Sampler": nodes.SamplerNode,
+    "OCS Substeps": nodes.SubstepsNode,
+    "OCS Group": nodes.GroupNode,
+    "OCS Param": nodes.ParamNode,
+    "OCS MultiParam": nodes.MultiParamNode,
 }
 __all__ = ["NODE_CLASS_MAPPINGS"]

@@ -37,14 +37,14 @@ def composable_sampler(
     *,
     s_noise=1.0,
     eta=1.0,
-    composable_sampler_options,
+    overly_complicated_options,
     extra_args=None,
     callback=None,
     disable=None,
     noise_sampler=None,
     **kwargs,
 ):
-    copts = composable_sampler_options.copy()
+    copts = overly_complicated_options.copy()
     if extra_args is None:
         extra_args = {}
     if noise_sampler is None:
@@ -60,9 +60,7 @@ def composable_sampler(
             x,
             x.new_ones((x.shape[0],)),
             extra_args,
-            size=copts.get("model_call_cache", 0),
-            max_use=copts.get("model_call_cache_max_use", 1000000),
-            threshold=copts.get("model_call_cache_threshold", 0),
+            **copts.get("model_call_cache", {}),
         ),
         sigmas,
         0,
