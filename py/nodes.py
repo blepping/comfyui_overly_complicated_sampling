@@ -111,7 +111,7 @@ class GroupNode:
         params_opt=None,
         parameters="",
     ):
-        group = StepSamplerGroups() if groups_opt is None else groups_opt
+        group = StepSamplerGroups() if groups_opt is None else groups_opt.clone()
         chain = substeps.clone()
         chain.merge_method = merge_method
         chain.time_mode = time_mode
