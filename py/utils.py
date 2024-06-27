@@ -23,3 +23,7 @@ def find_first_unsorted(tensor, desc=True):
     fun = torch.gt if desc else torch.lt
     first_unsorted = fun(tensor[1:], tensor[:-1]).nonzero().flatten()[:1].add_(1)
     return None if not len(first_unsorted) else first_unsorted.item()
+
+
+def fallback(val, default, exclude=None):
+    return val if val is not exclude else default

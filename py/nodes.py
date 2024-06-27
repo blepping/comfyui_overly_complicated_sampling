@@ -1,10 +1,11 @@
+import yaml
+
+import comfy
+
 from .sampling import composable_sampler
 from .substep_sampling import StepSamplerChain, StepSamplerGroups, ParamGroup
 from .substep_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
-
-import comfy
-import yaml
 
 DEFAULT_YAML_PARAMS = """\
 # Enter parameters here in JSON or YAML format
@@ -254,13 +255,94 @@ class MultiParamNode:
         return (params,)
 
 
-class SimpleRestartSchedule:
+# class SimpleRestartSchedule:
+#     @classmethod
+#     def INPUT_TYPES(cls):
+#         return {
+#             "required": {"sigmas": ("SIGMAS",)},
+#             "optional": {"segments": ("STRING", {"default": "10+4x2"})},
+#         }
+
+
+class ModelSetMaxSigmaNode:
+    RETURN_TYPES = ("MODEL",)
+    CATEGORY = "hacks"
+    FUNCTION = "go"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"sigmas": ("SIGMAS",)},
-            "optional": {"segments": ("STRING", {"default": "10+4x2"})},
+            "required": {
+                "model": ("MODEL",),
+                "mode": (("recalculate", "simple_multiply"),),
+                "sigma_max": (
+                    "FLOAT",
+                    {
+                        "default": -1.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
+                        "step": 0.01,
+                        "round'": False,
+                    },
+                ),
+                "fake_sigma_min": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 1000.0,
+                        "step": 0.01,
+                        "round'": False,
+                    },
+                ),
+            }
         }
+
+    def go(self, model, mode="recalculate", sigma_max=-1.0, fake_sigma_min=0.0):
+        if sigma_max == 0:
+            raise ValueError("ModelSetMaxSigma: Invalid sigma_max value")
+        if mode not in ("recalculate", "simple_multiply"):
+            raise ValueError("ModelSetMaxSigma: Invalid mode value")
+        orig_ms = model.get_model_object("model_sampling")
+        model = model.clone()
+        orig_max_sigma, orig_min_sigma = (
+            orig_ms.sigma_max.item(),
+            orig_ms.sigma_min.item(),
+        )
+        max_multiplier = abs(sigma_max) if sigma_max < 0 else sigma_max / orig_max_sigma
+        if max_multiplier == 1:
+            return (model,)
+        mcfg = model.get_model_object("model_config")
+        orig_sigmas = orig_ms.sigmas
+        fake_sigma_min = orig_sigmas.new_full((1,), fake_sigma_min)
+
+        class NewModelSampling(orig_ms.__class__):
+            if fake_sigma_min != 0:
+
+                @property
+                def sigma_min(self):
+                    return fake_sigma_min
+
+        ms = NewModelSampling(mcfg)
+        if mode == "simple_multiply":
+            ms.set_sigmas(orig_sigmas * max_multiplier)
+        else:
+            ss = getattr(mcfg, "sampling_setting", None) or {}
+            if ss.get("beta_schedule", "linear") != "linear":
+                raise NotImplementedError(
+                    "ModelSetMaxSigma: Can only handle linear beta schedules in reschedule mode"
+                )
+            ms.set_sigmas((orig_sigmas**2 * max_multiplier**2) ** 0.5)
+        new_max_sigma, new_min_sigma = ms.sigma_max.item(), ms.sigma_min.item()
+        if new_min_sigma >= new_max_sigma:
+            raise ValueError(
+                "ModelSetMaxSigma: Invalid fake_min_sigma value, result max <= min"
+            )
+        model.add_object_patch("model_sampling", ms)
+        print(
+            f"ModelSetMaxSigma: Set model sigmas({mode}): old_max={orig_max_sigma:.04}, old_min={orig_min_sigma:.03}, new_max={new_max_sigma:.04}, new_min={new_min_sigma:.03}"
+        )
+        return (model,)
 
 
 __all__ = (
@@ -269,4 +351,5 @@ __all__ = (
     "SubstepsNode",
     "ParamNode",
     "MultiParamNode",
+    "ModelSetMaxSigmaNode",
 )

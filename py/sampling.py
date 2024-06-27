@@ -2,7 +2,7 @@ import torch
 from tqdm.auto import trange
 
 
-from .substep_sampling import SamplerState, History, ModelCallCache, NoiseSamplerCache
+from .substep_sampling import SamplerState, ModelCallCache, NoiseSamplerCache
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 
 
@@ -64,14 +64,13 @@ def composable_sampler(
         ),
         sigmas,
         0,
-        History(x, 3),
-        History(x, 2),
         extra_args,
         noise_sampler=noise_sampler,
         callback=callback,
         eta=eta if eta != 1.0 else copts["eta"],
         s_noise=s_noise if s_noise != 1.0 else copts["s_noise"],
         reta=copts.get("reta", 1.0),
+        disable_status=disable,
     )
     groups = copts["_groups"]
     merge_samplers = tuple(
@@ -89,31 +88,40 @@ def composable_sampler(
     sigma_chunks = tuple(restart_split_sigmas(sigmas))
     step_count = sum(len(chunk) - 1 for _noise, chunk in sigma_chunks)
     step = 0
-    with trange(step_count, disable=disable) as pbar:
+    restart_snoise = copts.get("restart_s_noise", 1.0)
+    with trange(step_count, leave=True, disable=ss.disable_status) as pbar:
         for noise_scale, chunk_sigmas in sigma_chunks:
             ss.sigmas = chunk_sigmas
-            nsc.reset_cache()
-            ss.dhist.reset()
-            ss.xhist.reset()
+            ss.update(0, step=step)
+            if step != 0:
+                nsc.reset_cache()
+                ss.hist.reset()
+                for ms in merge_samplers:
+                    ms.reset()
             nsc.min_sigma, nsc.max_sigma = chunk_sigmas[-1], chunk_sigmas[0]
             if noise_scale != 0:
                 restart_ns = nsc.make_caching_noise_sampler(
                     restart_custom_noise, 1, nsc.max_sigma, nsc.min_sigma
                 )
-                x += nsc.scale_noise(restart_ns(), noise_scale)
+                x += nsc.scale_noise(restart_ns(), noise_scale * restart_snoise)
                 del restart_ns
             for idx in range(len(chunk_sigmas) - 1):
-                ss.update(idx, step=step)
-                print(
-                    f"STEP {step + 1}: {ss.sigma.item():.3} -> {ss.sigma_next.item():.3}"
-                )
+                if idx > 0:
+                    ss.update(idx, step=step)
+                # print(
+                #     f"STEP {step + 1:>3}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03} || up={ss.sigma_up.item():.03}, down={ss.sigma_down.item():.03}"
+                # )
                 ss.model.reset_cache()
                 nsc.update_x(x)
                 ms_idx = groups.find_match(ss.sigma, step, step_count)
                 if ms_idx is None:
                     raise RuntimeError(f"No matching sampler group for step {step + 1}")
                 merge_sampler = merge_samplers[ms_idx]
+                pbar.set_description(
+                    f"{merge_sampler.name}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03}"
+                )
                 x = merge_sampler.step(x)
+                # ss.xhist.push(x)
                 if (idx + 1) % nsc.cache_reset_interval == 0:
                     nsc.reset_cache()
                 step += 1

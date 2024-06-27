@@ -2,9 +2,10 @@ import gc
 import random
 import torch
 
-from comfy.k_diffusion.sampling import get_ancestral_step
+import comfy
+from comfy.k_diffusion.sampling import get_ancestral_step, to_d
 
-from .utils import scale_noise
+from .utils import scale_noise, fallback
 
 
 class Items:
@@ -94,6 +95,26 @@ class StepSamplerGroups(CommonOptionsItems):
 
 
 class History:
+    def __init__(self, size):
+        self.history = []
+        self.size = size
+
+    def __len__(self):
+        return len(self.history)
+
+    def __getitem__(self, k):
+        return self.history[k]
+
+    def push(self, val):
+        if len(self.history) >= self.size:
+            self.history = self.history[-(self.size - 1) :]
+        self.history.append(val)
+
+    def reset(self):
+        self.history = []
+
+
+class History_:
     def __init__(self, x, size):
         self.history = torch.zeros(size, *x.shape, device=x.device, dtype=x.dtype)
         self.size = size
@@ -105,16 +126,19 @@ class History:
 
     def __getitem__(self, k):
         idx = (self.pos + k if k < 0 else self.pos + -self.size + k) % self.size
-        # print(f"\nFETCH {k}: pos={self.pos}, size={self.size}, at={idx}")
+        print(f"\nFETCH {k}: pos={self.pos}, size={self.size}, at={idx}")
         return self.history[idx]
 
     def push(self, val):
-        # print(f"\nPUSH {self.pos % self.size}: pos={self.pos}, size={self.size}")
         self.last = self.pos % self.size
+        print(
+            f"\nPUSH {self.pos % self.size}: pos={self.pos}, size={self.size}, at={self.last}"
+        )
         self.history[self.last] = val
         self.pos += 1
 
     def reset(self):
+        print("HRESET")
         self.pos = 0
         self.last = None
 
@@ -242,6 +266,35 @@ class NoiseSamplerCache:
         return noise_sampler
 
 
+class ModelResult:
+    def __init__(
+        self,
+        call_idx,
+        sigma,
+        x,
+        denoised,
+        /,
+        denoised_uncond=None,
+        tangents=None,
+        jdenoised=None,
+    ):
+        self.call_idx = call_idx
+        self.sigma = sigma
+        self.x = x
+        self.jdenoised = jdenoised
+        self.tangents = tangents
+        self.denoised = denoised
+        self.denoised_uncond = denoised_uncond
+
+    @property
+    def d(self, /, x=None, sigma=None, denoised=None):
+        return to_d(
+            fallback(x, self.x),
+            fallback(sigma, self.sigma),
+            fallback(denoised, self.denoised),
+        )
+
+
 class ModelCallCache:
     def __init__(
         self, model, x, s_in, extra_args, *, size=0, max_use=1000000, threshold=1
@@ -250,18 +303,15 @@ class ModelCallCache:
         self.model = model
         self.threshold = threshold
         self.s_in = s_in
-        self.extra_args = extra_args
         self.max_use = max_use
+        self.extra_args = extra_args
         if self.size < 1:
             return
-        self.mcc = torch.zeros(size, *x.shape, device=x.device, dtype=x.dtype)
-        self.jmcc = torch.zeros_like(self.mcc)
         self.reset_cache()
 
     def reset_cache(self):
         size = self.size
         self.slot = [None] * size
-        self.jslot = [None] * size
         self.slot_use = [self.max_use] * size
 
     def get(self, idx, *, jvp=False):
@@ -273,36 +323,106 @@ class ModelCallCache:
             or self.slot_use[idx] < 1
         ):
             return None
-        if jvp and self.jslot[idx] is None:
+        result = self.slot[idx]
+        if jvp and result.jdenoised is None:
             return None
         self.slot_use[idx] -= 1
-        return self.slot[idx] if not jvp else (self.slot[idx], self.jslot[idx])
+        return result
 
-    def set(self, idx, denoised, jdenoised=None):
+    def set(self, idx, mr):
         idx -= self.threshold
         if idx < 0 or idx >= self.size:
             return
         self.slot_use[idx] = self.max_use
-        self.slot[idx] = denoised
-        self.jslot[idx] = jdenoised
+        self.slot[idx] = mr
 
     def call_model(self, x, sigma, **kwargs):
         return self.model(x, sigma * self.s_in, **self.extra_args, **kwargs)
 
-    def __call__(self, x, sigma, *, model_call_idx=0, tangents=None, **kwargs):
+    def __call__(
+        self,
+        x,
+        sigma,
+        *,
+        model_call_idx=0,
+        s_in=None,
+        tangents=None,
+        return_cached=False,
+        **kwargs,
+    ):
         result = self.get(model_call_idx, jvp=tangents is not None)
         # print(
         #     f"MODEL: idx={model_call_idx}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
         # )
         if result is not None:
-            return result
+            return (result, True) if return_cached else result
+
+        comfy.model_management.throw_exception_if_processing_interrupted()
+
+        model_options = self.extra_args.get("model_options", {}).copy()
+        denoised_uncond = None
+
+        def postcfg(args):
+            nonlocal denoised_uncond
+            denoised_uncond = args["uncond_denoised"]
+            return args["denoised"]
+
+        extra_args = self.extra_args | {
+            "model_options": comfy.model_patcher.set_model_options_post_cfg_function(
+                model_options, postcfg, disable_cfg1_optimization=True
+            )
+        }
+        s_in = fallback(s_in, self.s_in)
+
+        def call_model(x, sigma, **kwargs):
+            return self.model(x, sigma * s_in, **extra_args, **kwargs)
+
+        if tangents is None:
+            denoised = call_model(x, sigma, **kwargs)
+            mr = ModelResult(
+                model_call_idx, sigma, x, denoised, denoised_uncond=denoised_uncond
+            )
+            self.set(model_call_idx, mr)
+            return (mr, False) if return_cached else mr
+        denoised, denoised_prime = torch.func.jvp(call_model, (x, sigma), tangents)
+        mr = ModelResult(
+            model_call_idx,
+            sigma,
+            x,
+            denoised,
+            jdenoised=denoised_prime,
+            denoised_uncond=denoised_uncond,
+        )
+        self.set(model_call_idx, mr)
+        return (mr, False) if return_cached else mr
+
+    def ___call__(
+        self,
+        x,
+        sigma,
+        *,
+        model_call_idx=0,
+        tangents=None,
+        return_cached=False,
+        **kwargs,
+    ):
+        result = self.get(model_call_idx, jvp=tangents is not None)
+        # print(
+        #     f"MODEL: idx={model_call_idx}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
+        # )
+        if result is not None:
+            return (result, True) if return_cached else result
         if tangents is None:
             denoised = self.call_model(x, sigma, **kwargs)
             self.set(model_call_idx, denoised)
-            return denoised
+            return (denoised, False) if return_cached else denoised
         denoised, denoised_prime = torch.func.jvp(self.call_model, (x, sigma), tangents)
         self.set(model_call_idx, denoised, jdenoised=denoised_prime)
-        return denoised, denoised_prime
+        return (
+            (denoised, denoised_prime, False)
+            if return_cached
+            else (denoised, denoised_prime)
+        )
 
 
 class SamplerState:
@@ -311,8 +431,6 @@ class SamplerState:
         model,
         sigmas,
         idx,
-        dhist,
-        xhist,
         extra_args,
         *,
         step=0,
@@ -323,20 +441,32 @@ class SamplerState:
         eta=1.0,
         reta=1.0,
         s_noise=1.0,
+        disable_status=False,
     ):
         self.model = model
-        self.dhist = dhist
-        self.xhist = xhist
+        self.hist = History(4)
         self.extra_args = extra_args
         self.eta = eta
         self.reta = reta
         self.s_noise = s_noise
         self.sigmas = sigmas
-        self.denoised = denoised
         self.callback_ = callback
         self.noise_sampler = noise_sampler
         self.noise = noise
+        self.disable_status = disable_status
         self.update(idx)
+
+    @property
+    def hcur(self):
+        return self.hist[-1]
+
+    @property
+    def hprev(self):
+        return self.hist[-2]
+
+    @property
+    def denoised(self):
+        return self.hcur.denoised
 
     def update(self, idx=None, step=None):
         idx = self.idx if idx is None else idx
@@ -349,21 +479,22 @@ class SamplerState:
         if step is not None:
             self.step = step
 
-    def get_ancestral_step(self, eta=1.0):
-        return get_ancestral_step(self.sigma, self.sigma_next, eta=eta)
+    def get_ancestral_step(self, eta=1.0, sigma=None, sigma_next=None):
+        sigma = self.sigma if sigma is None else sigma
+        sigma_next = self.sigma_next if sigma_next is None else sigma_next
+        return get_ancestral_step(sigma, sigma_next, eta=eta if sigma_next != 0 else 0)
 
     def clone_edit(self, **kwargs):
         obj = self.__class__.__new__(self.__class__)
         for k in (
             "model",
-            "dhist",
-            "xhist",
+            "hist",
             "extra_args",
+            "disable_status",
             "eta",
             "reta",
             "s_noise",
             "sigmas",
-            "denoised",
             "callback_",
             "noise_sampler",
             "noise",
@@ -379,13 +510,18 @@ class SamplerState:
         obj.update()
         return obj
 
-    def callback(self, x):
+    def callback(self, hi=None):
         if not self.callback_:
             return None
+        hi = self.hcur if hi is None else hi
         return self.callback_({
-            "x": x,
+            "x": hi.x,
             "i": self.step,
-            "sigma": self.sigma,
-            "sigma_hat": self.sigma,
-            "denoised": self.dhist[-1],
+            "sigma": hi.sigma,
+            "sigma_hat": hi.sigma,
+            "denoised": hi.denoised,
         })
+
+    def reset(self):
+        self.hist.reset()
+        self.denoised = None

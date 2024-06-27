@@ -88,6 +88,7 @@ I can move code around but sampling math and creating samplers is far beyond my 
 * Euler, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
 * Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4 and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
 * TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
+* IPNDM and IPNDM_V adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
 * Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
 
-Thanks!
+This repo wouldn't be possible without building on the work of others. Thanks!

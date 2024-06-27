@@ -7,5 +7,6 @@ NODE_CLASS_MAPPINGS = {
     "OCS Group": nodes.GroupNode,
     "OCS Param": nodes.ParamNode,
     "OCS MultiParam": nodes.MultiParamNode,
+    "OCS ModelSetMaxSigma": nodes.ModelSetMaxSigmaNode,
 }
 __all__ = ["NODE_CLASS_MAPPINGS"]
