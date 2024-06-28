@@ -113,34 +113,11 @@ class History:
     def reset(self):
         self.history = []
 
-
-class History_:
-    def __init__(self, x, size):
-        self.history = torch.zeros(size, *x.shape, device=x.device, dtype=x.dtype)
-        self.size = size
-        self.pos = 0
-        self.last = None
-
-    def __len__(self):
-        return min(self.pos, self.size)
-
-    def __getitem__(self, k):
-        idx = (self.pos + k if k < 0 else self.pos + -self.size + k) % self.size
-        print(f"\nFETCH {k}: pos={self.pos}, size={self.size}, at={idx}")
-        return self.history[idx]
-
-    def push(self, val):
-        self.last = self.pos % self.size
-        print(
-            f"\nPUSH {self.pos % self.size}: pos={self.pos}, size={self.size}, at={self.last}"
-        )
-        self.history[self.last] = val
-        self.pos += 1
-
-    def reset(self):
-        print("HRESET")
-        self.pos = 0
-        self.last = None
+    def clone(self):
+        obj = self.__new__(self.__class__)
+        obj.__init__(self.size)
+        obj.history = self.history.copy()
+        return obj
 
 
 class NoiseSamplerCache:
@@ -155,7 +132,7 @@ class NoiseSamplerCache:
         cpu_noise=True,
         batch_size=32,
         caching=True,
-        cache_reset_interval=9999,
+        cache_reset_interval=1,
         set_seed=False,
         scale=1.0,
         normalize_dims=(-3, -2, -1),
@@ -286,13 +263,20 @@ class ModelResult:
         self.denoised = denoised
         self.denoised_uncond = denoised_uncond
 
+    def to_d(
+        self, /, x=None, sigma=None, denoised=None, denoised_uncond=None, cfgpp_scale=0
+    ):
+        x = fallback(x, self.x)
+        sigma = fallback(sigma, self.sigma)
+        denoised = fallback(denoised, self.denoised)
+        denoised_uncond = fallback(denoised_uncond, self.denoised_uncond)
+        if cfgpp_scale != 0:
+            x = x - denoised * cfgpp_scale + denoised_uncond * cfgpp_scale
+        return to_d(x, sigma, denoised)
+
     @property
-    def d(self, /, x=None, sigma=None, denoised=None):
-        return to_d(
-            fallback(x, self.x),
-            fallback(sigma, self.sigma),
-            fallback(denoised, self.denoised),
-        )
+    def d(self):
+        return self.to_d()
 
 
 class ModelCallCache:

@@ -11,7 +11,7 @@ from comfy.k_diffusion.sampling import (
 )
 
 from .res_support import _de_second_order
-from .utils import find_first_unsorted, fallback
+from .utils import find_first_unsorted
 
 HAVE_TDE = HAVE_TODE = False
 
@@ -73,15 +73,8 @@ class CFGPPStepMixin:
     def init_cfgpp(self, /, cfgpp_scale=0.0):
         self.cfgpp_scale = 0.0 if not self.allow_cfgpp else cfgpp_scale
 
-    def to_d(self, mr, /, x=None, sigma=None, denoised=None, denoised_uncond=None):
-        x = fallback(x, mr.x)
-        sigma = fallback(sigma, mr.sigma)
-        denoised = fallback(denoised, mr.denoised)
-        scale = self.cfgpp_scale
-        if scale == 0:
-            return to_d(x, sigma, denoised)
-        denoised_uncond = fallback(denoised_uncond, mr.denoised_uncond)
-        return to_d(x - denoised * scale + denoised_uncond * scale, sigma, denoised)
+    def to_d(self, mr, **kwargs):
+        return mr.to_d(**kwargs)
 
 
 class SingleStepSampler(CFGPPStepMixin):
@@ -230,7 +223,7 @@ class EulerStep(SingleStepSampler):
 
 
 class CycleSingleStepSampler(SingleStepSampler):
-    def __init__(self, *, cycle_pct=1.0, **kwargs):
+    def __init__(self, *, cycle_pct=0.25, **kwargs):
         super().__init__(**kwargs)
         self.cycle_pct = cycle_pct
 
@@ -1085,7 +1078,7 @@ class HeunPP2Step(SingleStepSampler):
 
     def __init__(self, *args, max_order=3, **kwargs):
         super().__init__(*args, **kwargs)
-        self.max_order = max_order
+        self.max_order = max(1, min(self.model_calls + 1, max_order))
 
     def step(self, x, ss):
         steps_remain = max(0, len(ss.sigmas) - (ss.idx + 2))
@@ -1364,29 +1357,30 @@ class TODEStep(SingleStepSampler, MinSigmaStepMixin):
 
 
 STEP_SAMPLERS = {
-    "bogacki": BogackiStep,
+    "default (euler)": EulerStep,
+    "bogacki (2)": BogackiStep,
+    "deis": DEISStep,
     "dpmpp_2m_sde": DPMPP2MSDEStep,
     "dpmpp_2m": DPMPP2MStep,
     "dpmpp_2s": DPMPP2SStep,
     "dpmpp_3m_sde": DPMPP3MSDEStep,
-    "dpmpp_sde": DPMPPSDEStep,
+    "dpmpp_sde (1)": DPMPPSDEStep,
     "euler_cycle": EulerCycleStep,
     "euler_dancing": EulerDancingStep,
     "euler": EulerStep,
-    "heunpp": HeunPP2Step,
-    "ipndm": IPNDMStep,
+    "heunpp (1-2)": HeunPP2Step,
     "ipndm_v": IPNDMVStep,
-    "deis": DEISStep,
-    "res": RESStep,
-    "reversible_bogacki": ReversibleBogackiStep,
+    "ipndm": IPNDMStep,
+    "res (1)": RESStep,
+    "reversible_bogacki (2)": ReversibleBogackiStep,
+    "reversible_heun (1)": ReversibleHeunStep,
     "reversible_heun_1s": ReversibleHeun1SStep,
-    "reversible_heun": ReversibleHeunStep,
-    "rk4": RK4Step,
-    "tde": TDEStep,
-    "tode": TODEStep,
-    "trapezoidal_cycle": TrapezoidalCycleStep,
-    "trapezoidal": TrapezoidalStep,
-    "ttm_jvp": TTMJVPStep,
+    "rk4 (3)": RK4Step,
+    "tde (variable)": TDEStep,
+    "tode (variable)": TODEStep,
+    "trapezoidal (1)": TrapezoidalStep,
+    "trapezoidal_cycle (1)": TrapezoidalCycleStep,
+    "ttm_jvp (1)": TTMJVPStep,
 }
 
 __all__ = (
