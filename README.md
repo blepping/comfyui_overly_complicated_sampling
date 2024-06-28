@@ -36,7 +36,7 @@ You can connect a chain of `OCS Group` nodes to it and it will choose one per st
 
 #### Text Parameters
 
-Show in YAML with default values.
+Shown in YAML with default values.
 
 ```yaml
 # Noise scale. May not do anything currently.
@@ -158,7 +158,7 @@ Currently unused for groups.
 
 #### Text Parameters
 
-Show in YAML with default values.
+Shown in YAML with default values.
 
 ```yaml
 # Noise scale. May not do anything currently.
@@ -236,7 +236,7 @@ The difference with cycle is that instead of adding `noise * expected_noise_at_n
 
 #### Text Parameters
 
-Show in YAML with default values.
+Shown in YAML with default values.
 
 ```yaml
 # Scale for added noise.
