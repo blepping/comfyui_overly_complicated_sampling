@@ -452,6 +452,14 @@ class SamplerState:
     def denoised(self):
         return self.hcur.denoised
 
+    @property
+    def dt(self):
+        return self.sigma_next - self.sigma
+
+    @property
+    def d(self):
+        return self.hcur.d
+
     def update(self, idx=None, step=None):
         idx = self.idx if idx is None else idx
         self.idx = idx

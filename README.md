@@ -181,7 +181,7 @@ avgmerge_stretch: 0.4
 In alphabetical order.
 
 * `bogacki`: CFG++ enabled.
-* `deis`: May not work work ETA > 0. See parameters: `history_limit`
+* `deis`: See parameters: `history_limit`
 * `dpmpp_2m_sde`: See parameters: `history_limit`
 * `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`
 * `dpmpp_2s`
@@ -190,9 +190,9 @@ In alphabetical order.
 * `euler_cycle`: CFG++ enabled. See parameters: `cycle_pct`
 * `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`
 * `euler`: CFG++ enabled.
-* `heunpp`: May not work work ETA > 0. See parameters: `max_order`
-* `ipndm_v`: May not work work ETA > 0. See parameters: `history_limit`
-* `ipndm`: May not work work ETA > 0. See parameters: `history_limit`
+* `heunpp`: CFG++ enabled. See parameters: `max_order`
+* `ipndm_v`: See parameters: `history_limit`
+* `ipndm`: See parameters: `history_limit`
 * `res`
 * `reversible_bogacki`: CFG++ enabled.
 * `reversible_heun`: CFG++ enabled.
@@ -203,6 +203,8 @@ In alphabetical order.
 * `trapezoidal`: CFG++ enabled.
 * `trapezoidal_cycle`: CFG++ enabled. See parameters: `cycle_pct`
 * `ttm_jvp`: TTM is a weird sampler. If you're using model caching you must make sure the entries TTM uses are populated first (by having it run before any other samplers that call the model multiple times). It may also not work with some other model patches and upscale methods. See parameters: `alternate_phi_2_calc`
+
+`deis`, `ipndm*` samplers do have CFG++ enabled but it does not seem to work well. They also do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
 
 **ODE Solvers** (`tde`, `tode`):
 
@@ -308,9 +310,9 @@ ode_compile: false
 #   dpmpp_2m_sde: 1
 #   dpmpp_3m_sde: 2
 #   reversible_heun_1s: 1
-#   ipndm: 3
-#   ipndm_v: 3
-#   deis: 2 (max 3)
+#   ipndm: 1 (max 3)
+#   ipndm_v: 1 (max 3)
+#   deis: 1 (max 3)
 history_limit: 999 # Varies based on sampler.
 
 # Used for some samplers with variable order. List of samplers and default value below:

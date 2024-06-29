@@ -1,5 +1,7 @@
 import torch
 
+from comfy.k_diffusion.sampling import to_d
+
 
 def scale_noise(
     noise,
@@ -27,3 +29,12 @@ def find_first_unsorted(tensor, desc=True):
 
 def fallback(val, default, exclude=None):
     return val if val is not exclude else default
+
+
+# From Gaeros. Thanks!
+def extract_pred(x_before, x_after, sigma_before, sigma_after):
+    if sigma_after == 0:
+        return x_after, torch.zeros_like(x_after)
+    alpha = sigma_after / sigma_before
+    denoised = (x_after - alpha * x_before) / (1 - alpha)
+    return denoised, to_d(x_after, sigma_after, denoised)
