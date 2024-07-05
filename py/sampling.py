@@ -2,7 +2,8 @@ import torch
 from tqdm.auto import trange
 
 
-from .substep_sampling import SamplerState, ModelCallCache, NoiseSamplerCache
+from .noise import NoiseSamplerCache
+from .substep_sampling import SamplerState, ModelCallCache
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 
 

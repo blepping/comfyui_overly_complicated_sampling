@@ -2,7 +2,7 @@ import torch
 import contextlib
 import tqdm
 
-from .utils import find_first_unsorted
+from .utils import find_first_unsorted, fallback
 from .substep_samplers import STEP_SAMPLERS
 from .substep_sampling import History
 
@@ -23,9 +23,8 @@ class MergeSubstepsSampler:
         raise NotImplementedError
 
     def substep(self, x, sampler, ss=None):
-        if ss is None:
-            ss = self.ss
-        sg = sampler.step(x, ss)
+        ss = fallback(ss, self.ss)
+        sg = sampler(x, ss)
         next_x = None
         with contextlib.suppress(StopIteration):
             while True:
@@ -41,8 +40,7 @@ class MergeSubstepsSampler:
 
     def merge_steps(self, x, result=None, *, noise=None, ss=None, denoised=True):
         ss = ss if ss is not None else self.ss
-        if result is None:
-            result = x
+        result = fallback(result, x)
         if noise is not None:
             result = result + noise
         return result

@@ -1,11 +1,9 @@
-import gc
-import random
 import torch
 
 import comfy
 from comfy.k_diffusion.sampling import get_ancestral_step, to_d
 
-from .utils import scale_noise, fallback
+from .utils import fallback
 
 
 class Items:
@@ -120,129 +118,6 @@ class History:
         return obj
 
 
-class NoiseSamplerCache:
-    def __init__(
-        self,
-        x,
-        seed,
-        min_sigma,
-        max_sigma,
-        *,
-        normalize_noise=True,
-        cpu_noise=True,
-        batch_size=32,
-        caching=True,
-        cache_reset_interval=1,
-        set_seed=False,
-        scale=1.0,
-        normalize_dims=(-3, -2, -1),
-        **_unused,
-    ):
-        self.x = x
-        self.mega_x = None
-        self.seed = seed
-        self.seed_offset = 0
-        self.min_sigma = min_sigma
-        self.max_sigma = max_sigma
-        self.cache = {}
-        self.batch_size = max(1, batch_size)
-        self.normalize_noise = normalize_noise
-        self.cpu_noise = cpu_noise
-        self.caching = caching
-        self.cache_reset_interval = max(1, cache_reset_interval)
-        self.scale = float(scale)
-        self.normalize_dims = tuple(int(v) for v in normalize_dims)
-        self.update_x(x)
-        if set_seed:
-            random.seed(seed)
-            torch.manual_seed(seed)
-
-    def reset_cache(self):
-        self.cache = {}
-        gc.collect()
-
-    def scale_noise(self, noise, factor=1.0, normalized=None, normalize_dims=None):
-        normalized = self.normalize_noise if normalized is None else normalized
-        normalize_dims = (
-            self.normalize_dims if normalize_dims is None else normalize_dims
-        )
-        return scale_noise(
-            noise, factor, normalized=normalized, normalize_dims=normalize_dims
-        )
-
-    def update_x(self, x):
-        if self.x.shape == x.shape and self.mega_x is not None:
-            self.x = x
-            return
-        self.x = x
-        self.cache = {}
-        self.mega_x = None
-        if self.batch_size == 1:
-            self.mega_x = x
-            return
-        self.mega_x = x.repeat(x.shape[0] * self.batch_size, *((1,) * (x.dim() - 1)))
-
-    def set_cache(self, key, noise_sampler):
-        if not self.caching:
-            return
-        self.cache[key] = noise_sampler
-
-    def make_caching_noise_sampler(self, nsobj, size, sigma, sigma_next):
-        size = min(size, self.batch_size)
-        cache_key = (nsobj, size)
-        if self.caching:
-            noise_sampler = self.cache.get(cache_key)
-            if noise_sampler:
-                return noise_sampler
-        curr_seed = self.seed + self.seed_offset
-        self.seed_offset += 1
-        curr_x = self.mega_x[: self.x.shape[0] * size, ...]
-        if nsobj is None:
-
-            def ns(_s, _sn):
-                return torch.randn_like(curr_x)
-        else:
-            ns = nsobj.make_noise_sampler(
-                curr_x,
-                self.min_sigma,
-                self.max_sigma,
-                seed=curr_seed,
-                normalized=False,
-                cpu=self.cpu_noise,
-            )
-        if self.batch_size == 1:
-
-            def noise_sampler(*_unused, **_unusedkwargs):
-                return self.scale_noise(ns(sigma, sigma_next))
-
-            self.set_cache(cache_key, noise_sampler)
-            return noise_sampler
-
-        orig_h, orig_w = self.x.shape[-2:]
-        remain = 0
-        noise = None
-
-        def noise_sampler(*_unused, out_hw=(orig_h, orig_w)):
-            nonlocal remain, noise
-            if out_hw != (orig_h, orig_w):
-                raise NotImplementedError(
-                    f"Noise size mismatch: {out_hw} vs {(orig_h, orig_w)}"
-                )
-            if remain < 1:
-                noise = self.scale_noise(ns(sigma, sigma_next)).view(
-                    size,
-                    *self.x.shape,
-                )
-                remain = size
-                # print("NOISE BATCH", noise.shape, remain)
-            result = noise[-remain]
-            remain -= 1
-            return result
-
-        self.set_cache(cache_key, noise_sampler)
-        return noise_sampler
-
-
 class ModelResult:
     def __init__(
         self,
@@ -250,33 +125,56 @@ class ModelResult:
         sigma,
         x,
         denoised,
-        /,
-        denoised_uncond=None,
-        tangents=None,
-        jdenoised=None,
+        **kwargs,
     ):
         self.call_idx = call_idx
         self.sigma = sigma
         self.x = x
-        self.jdenoised = jdenoised
-        self.tangents = tangents
         self.denoised = denoised
-        self.denoised_uncond = denoised_uncond
+        for k in ("denoised_uncond", "denoised_cond", "tangents", "jdenoised"):
+            setattr(self, k, kwargs.pop(k, None))
+        if len(kwargs) != 0:
+            raise ValueError(f"Unexpected keyword arguments: {tuple(kwargs.keys())}")
 
     def to_d(
-        self, /, x=None, sigma=None, denoised=None, denoised_uncond=None, cfgpp_scale=0
+        self,
+        /,
+        x=None,
+        sigma=None,
+        denoised=None,
+        denoised_uncond=None,
+        alt_cfgpp_scale=0,
+        cfgpp=False,
     ):
         x = fallback(x, self.x)
         sigma = fallback(sigma, self.sigma)
         denoised = fallback(denoised, self.denoised)
         denoised_uncond = fallback(denoised_uncond, self.denoised_uncond)
-        if cfgpp_scale != 0:
-            x = x - denoised * cfgpp_scale + denoised_uncond * cfgpp_scale
-        return to_d(x, sigma, denoised)
+        if alt_cfgpp_scale != 0:
+            x = x - denoised * alt_cfgpp_scale + denoised_uncond * alt_cfgpp_scale
+        return to_d(x, sigma, denoised if not cfgpp else denoised_uncond)
 
     @property
     def d(self):
         return self.to_d()
+
+    def clone(self, deep=False):
+        obj = self.__new__(self.__class__)
+        for k in (
+            "denoised",
+            "call_idx",
+            "sigma",
+            "x",
+            "denoised_uncond",
+            "denoised_cond",
+            "tangents",
+            "jdenoised",
+        ):
+            val = getattr(self, k)
+            if deep and isinstance(val, torch.Tensor):
+                val = val.copy()
+            setattr(obj, k, val)
+        return obj
 
 
 class ModelCallCache:
@@ -323,6 +221,10 @@ class ModelCallCache:
     def call_model(self, x, sigma, **kwargs):
         return self.model(x, sigma * self.s_in, **self.extra_args, **kwargs)
 
+    @property
+    def model_sampling(self):
+        return self.model.inner_model.inner_model.model_sampling
+
     def __call__(
         self,
         x,
@@ -344,11 +246,12 @@ class ModelCallCache:
         comfy.model_management.throw_exception_if_processing_interrupted()
 
         model_options = self.extra_args.get("model_options", {}).copy()
-        denoised_uncond = None
+        denoised_cond = denoised_uncond = None
 
         def postcfg(args):
-            nonlocal denoised_uncond
+            nonlocal denoised_cond, denoised_uncond
             denoised_uncond = args["uncond_denoised"]
+            denoised_cond = args["cond_denoised"]
             return args["denoised"]
 
         extra_args = self.extra_args | {
@@ -364,7 +267,12 @@ class ModelCallCache:
         if tangents is None:
             denoised = call_model(x, sigma, **kwargs)
             mr = ModelResult(
-                model_call_idx, sigma, x, denoised, denoised_uncond=denoised_uncond
+                model_call_idx,
+                sigma,
+                x,
+                denoised,
+                denoised_uncond=denoised_uncond,
+                denoised_cond=denoised_cond,
             )
             self.set(model_call_idx, mr)
             return (mr, False) if return_cached else mr
@@ -376,6 +284,7 @@ class ModelCallCache:
             denoised,
             jdenoised=denoised_prime,
             denoised_uncond=denoised_uncond,
+            denoised_cond=denoised_cond,
         )
         self.set(model_call_idx, mr)
         return (mr, False) if return_cached else mr

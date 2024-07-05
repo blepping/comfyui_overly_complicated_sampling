@@ -9,6 +9,22 @@ Current status: In flux, not suitable for general use.
 
 *Note*: You will basically always have to tweak settings like `s_noise` to get a good result. If the generation looks smooth/undetailed increase `s_noise` somewhere. If it looks crunchy, super high contrast, etc then try reducing noise.
 
+
+
+## Credits
+
+I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
+
+* Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
+* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4 and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
+* IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
+* Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and idea for sampling with it from https://github.com/Clybius
+
+This repo wouldn't be possible without building on the work of others. Thanks!
+
+
 ## Usage
 
 First, a note on the basic structure:
@@ -85,6 +101,37 @@ noise:
     # Interval (in full steps) to reset the cache. Brownian noise takes time into account so
     # if using Brownian you will generally want to reset each step.
     cache_reset_interval: 1
+
+    # Immiscible noise processing, see: https://arxiv.org/abs/2406.12303
+    immiscible:
+        # Batch size, 0 disables.
+        size: 0
+
+        # Reference mode, one of:
+        #   x: Uses the current latent as a reference.
+        #   noise: Uses the current noise as a reference (x - denoised)
+        #   denoised: Uses the model image prediction as a reference.
+        mode: x
+
+        # Batching mode, one of:
+        #   batch: Matches vs batches. Immiscible mode is disabled if size < 2
+        #   channel: Splits the batch into a list of channels and matches against those.
+        #   row: Splits the batch into a list of rows and matches against those.
+        #   column: Splits the batch into a list of columns and matches against those.
+        #           Note: Requires reshaping both the noise and x, may be slow and consume
+        #                 a lot of VRAM.
+        batching: channel
+
+        # Scale for reference latent. Can be negative.
+        scale_ref: 1.0
+
+        # Allows normalizing the reference. If this is a list, you can specify the dimensions to
+        # normalize. See normalize_dims above and https://pytorch.org/docs/stable/generated/torch.std.html
+        normalize_ref: false
+
+        # The proportion of immiscible-ized noise.
+        # You get (immiscible_noise * strength) + ((1.0 - strength) * normal_noise) - LERP.
+        strength: 1.0
 
 
 # Model calls can be cached. This is very experimental: I don't recommend using it
@@ -342,16 +389,3 @@ dyn_deta_end: null
 # One of lerp, lerp_alt, deta
 dyn_deta_mode: "lerp"
 ```
-
-
-## Credits
-
-I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
-
-* Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
-* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4 and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-* TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
-* IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
-* Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-
-This repo wouldn't be possible without building on the work of others. Thanks!
