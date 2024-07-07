@@ -8,7 +8,7 @@ from .substep_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 
 DEFAULT_YAML_PARAMS = """\
-# Enter parameters here in JSON or YAML format
+# JSON or YAML parameters
 s_noise: 1.0
 eta: 1.0
 """

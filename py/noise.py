@@ -11,8 +11,16 @@ from .utils import scale_noise, fallback
 class ImmiscibleNoise(
     collections.namedtuple(
         "ImmiscibleConfig",
-        ("size", "mode", "batching", "scale_ref", "normalize_ref", "strength"),
-        defaults=(0, "x", "channels", 1.0, False, 1.0),
+        (
+            "size",
+            "ref",
+            "batching",
+            "scale_ref",
+            "normalize_ref",
+            "strength",
+            "maximize",
+        ),
+        defaults=(0, "x", "channels", 1.0, False, 1.0, False),
     )
 ):
     def __call__(self, noise_sampler, x_ref, refs=None):
@@ -32,9 +40,9 @@ class ImmiscibleNoise(
         )  # LERP
 
     def get_ref(self, x_ref, refs=None):
-        ref = fallback(refs, {}).get(self.mode, x_ref)
+        ref = self.custom_ref({"x": x_ref} | fallback(refs, {}))
         ref = scale_noise(
-            ref.clone(),
+            ref,
             self.scale_ref,
             normalized=self.normalize_ref not in (False, None),
             normalize_dims=self.normalize_ref
@@ -42,6 +50,41 @@ class ImmiscibleNoise(
             else (-3, -2, -1),
         )
         return ref
+
+    def custom_ref(self, refs):
+        ops = self.ref.split(None)
+        ops.reverse()
+        result = refs.get(ops.pop())
+        if result is None:
+            raise ValueError("Bad custom refs: must start with a value")
+        result = result.clone()
+        while ops:
+            if len(ops) < 2:
+                raise ValueError("Bad custom refs: too short")
+            op, valkey = ops.pop(), ops.pop()
+            if valkey[0] in ("+", "-") or valkey[0].isdigit():
+                val = float(valkey)
+            else:
+                val = refs.get(valkey)
+                if val is None:
+                    raise ValueError(f"Value {valkey} not found for op {op}")
+            if op in ("+", "add"):
+                result += val
+            elif op in ("-", "sub"):
+                result -= val
+            elif op in ("*", "mul"):
+                result *= val
+            elif op in ("/", "div"):
+                result /= min(val, 1e-06)
+            elif op in ("min", "max"):
+                if not isinstance(val, torch.Tensor):
+                    val = result.new_full((1,), val)
+                result = result.minimum(val) if op == "min" else result.maximum(val)
+            elif op == "norm":
+                result = scale_noise(result, val, normalized=True)
+        if result is None:
+            raise ValueError("Bad custom reference")
+        return result
 
     def batch(self, noise, ref):
         if self.batching == "batch":
@@ -71,8 +114,7 @@ class ImmiscibleNoise(
 
     # Based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395
     # Idea from https://github.com/Clybius
-    @staticmethod
-    def choose(noise, latents):
+    def choose(self, noise, latents):
         # "Immiscible Diffusion: Accelerating Diffusion Training with Noise Assignment" (2024) Li et al. arxiv.org/abs/2406.12303
         # Minimize latent-noise pairs over a batch
         n = noise.shape[0]
@@ -82,8 +124,8 @@ class ImmiscibleNoise(
         )
         dist = (latents_expanded - noise_expanded) ** 2
         dist = dist.mean(list(range(2, dist.dim()))).cpu()
-        assign_mat = scipy.optimize.linear_sum_assignment(dist)
-        print("IMM IDX", assign_mat[1])
+        assign_mat = scipy.optimize.linear_sum_assignment(dist, maximize=self.maximize)
+        # print("IMM IDX", assign_mat[1])
         return noise[assign_mat[1]]
 
 
@@ -121,7 +163,6 @@ class NoiseSamplerCache:
         self.scale = float(scale)
         self.normalize_dims = tuple(int(v) for v in normalize_dims)
         self.immiscible = ImmiscibleNoise(**fallback(immiscible, {}))
-        print("IMM", self.immiscible)
         self.update_x(x)
         if set_seed:
             random.seed(seed)

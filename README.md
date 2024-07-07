@@ -107,11 +107,18 @@ noise:
         # Batch size, 0 disables.
         size: 0
 
-        # Reference mode, one of:
+        # Reference mode, values can be one of:
         #   x: Uses the current latent as a reference.
         #   noise: Uses the current noise as a reference (x - denoised)
-        #   denoised: Uses the model image prediction as a reference.
-        mode: x
+        #   denoised: Uses the model image prediction as a reference (factors in positive and negative prompts).
+        #   uncond: The model unconditional prediction (negative prompt)
+        #   cond: The model conditional prediction (positive prompt)
+        # Advanced feature: Additionally you may enter a string of operations in the format:
+        #   "x - denoised * 2 + cond" (just an example, not a recommended setting)
+        # Possible operations: + - / * min max add sub div mul
+        # Note: Each value and operation must be space delimited (i.e. "x-1" will not work).
+        #       Also normal operator precedence does not apply here.
+        ref: x
 
         # Batching mode, one of:
         #   batch: Matches vs batches. Immiscible mode is disabled if size < 2
@@ -132,6 +139,9 @@ noise:
         # The proportion of immiscible-ized noise.
         # You get (immiscible_noise * strength) + ((1.0 - strength) * normal_noise) - LERP.
         strength: 1.0
+
+        # See: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html#scipy.optimize.linear_sum_assignment
+        maximize: false
 
 
 # Model calls can be cached. This is very experimental: I don't recommend using it
