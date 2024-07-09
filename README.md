@@ -237,33 +237,70 @@ avgmerge_stretch: 0.4
 
 In alphabetical order.
 
-* `bogacki`: CFG++ enabled.
+* `bogacki`:
 * `deis`: See parameters: `history_limit`
 * `dpmpp_2m_sde`: See parameters: `history_limit`
 * `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`
 * `dpmpp_2s`
 * `dpmpp_3m_sde`: See parameters: `history_limit`
 * `dpmpp_sde`
-* `euler_cycle`: CFG++ enabled. See parameters: `cycle_pct`
+* `euler_cycle`: See parameters: `cycle_pct`
 * `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`
-* `euler`: CFG++ enabled.
-* `heunpp`: CFG++ enabled. See parameters: `max_order`
+* `euler`:
+* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`
+* `heun_1s`: Alternate Heun one step implementation. Supports reversible parameters.
+* `heunpp`: See parameters: `max_order`
 * `ipndm_v`: See parameters: `history_limit`
 * `ipndm`: See parameters: `history_limit`
 * `res`
-* `reversible_bogacki`: CFG++ enabled.
-* `reversible_heun`: CFG++ enabled.
-* `reversible_heun_1s`: CFG++ enabled. See parameters: `history_limit`
-* `rk4`: CFG++ enabled.
-* `tde`: Uses the [torchdiffeq](https://github.com/rtqichen/torchdiffeq) ODE backend. See `ode_*` parameters below. CFG++ enabled.
-* `tode`: Uses the [torchode]((https://github.com/martenlienen/torchode)) ODE backend. See `ode_*` parameters below. CFG++ enabled.
-* `trapezoidal`: CFG++ enabled.
-* `trapezoidal_cycle`: CFG++ enabled. See parameters: `cycle_pct`
+* `reversible_bogacki`:
+* `reversible_heun`:
+* `reversible_heun_1s`: See parameters: `history_limit`
+* `rk4`:
+* `solver_diffrax`: Uses the [Diffrax](https://github.com/patrick-kidger/diffrax) solver backend. See `de_*` parameters below.
+* `solver_torchdiffeq`: Uses the [torchdiffeq](https://github.com/rtqichen/torchdiffeq) backend. See `de_*` parameters below.
+* `solver_torchode`: Uses the [torchode]((https://github.com/martenlienen/torchode)) backend. See `de_*` parameters below.
+* `solver_torchsde`: Uses the [torchsde](https://github.com/google-research/torchsde) backend. See `de_*` parameters below.
+* `trapezoidal`:
+* `trapezoidal_cycle`: See parameters: `cycle_pct`
 * `ttm_jvp`: TTM is a weird sampler. If you're using model caching you must make sure the entries TTM uses are populated first (by having it run before any other samplers that call the model multiple times). It may also not work with some other model patches and upscale methods. See parameters: `alternate_phi_2_calc`
 
-`deis`, `ipndm*` samplers do have CFG++ enabled but it does not seem to work well. They also do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
+**Sampler Feature Support**
 
-**ODE Solvers** (`tde`, `tode`):
+|Name|Cost|History|Order|Reversible|CFG++|
+|-|-|-|-|-|-|
+|`bogacki`|2|||||
+|`deis`|1|1-3 (1)||||
+|`dpmpp_2m_sde`|1|1||||
+|`dpmpp_2m`|1|1||||
+|`dpmpp_2s`|2|||||
+|`dpmpp_3m_sde`|1|1-2 (2)||||
+|`dpmpp_sde`|2|||||
+|`euler_cycle`|1||||X|
+|`euler_dancing`|1|||||
+|`euler`|1||||X|
+|`heun`|2|||X||
+|`heun_1s`|1|1||X||
+|`heunpp`|1-3||X|||
+|`ipndm_v`|1|1-3 (1)||||
+|`ipndm`|1|1-3 (1)||||
+|`res`|2|||||
+|`reversible_bogacki`|2|||X||
+|`reversible_heun`|2|||X||
+|`reversible_heun_1s`|1|1||X||
+|`rk4`|4|||||
+|`solver_diffrax`|variable|||||
+|`solver_torchdiffeq`|variable|||||
+|`solver_torchode`|variable|||||
+|`solver_torchsde`|variable|||||
+|`trapezoidal`|2|||||
+|`trapezoidal_cycle`|2|||||
+|`ttm_jvp`|2|||||
+
+
+`deis`, `ipndm*` do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
+
+**Solver Backend Samplers**:
 
 You will need to have the relevant Python package installed in your venv to use these. TDE cannot handle batches and
 each batch item will be evaluated separately. Using `tode` may be faster for batch sizes over 1.

@@ -1,9 +1,12 @@
 import contextlib
 import math
+import os
+import warnings
 
 import torch
 import tqdm
 import torchsde
+import numpy
 
 import comfy
 from comfy.k_diffusion.sampling import (
@@ -14,7 +17,7 @@ from comfy.k_diffusion.sampling import (
 from .res_support import _de_second_order
 from .utils import find_first_unsorted, extract_pred, fallback
 
-HAVE_TDE = HAVE_TODE = False
+HAVE_DIFFRAX = HAVE_TDE = HAVE_TODE = False
 
 with contextlib.suppress(ImportError):
     import torchdiffeq as tde
@@ -25,6 +28,17 @@ with contextlib.suppress(ImportError, RuntimeError):
     import torchode as tode
 
     HAVE_TODE = True
+
+if not os.environ.get("COMFYUI_OCS_NO_DIFFRAX_SOLVER"):
+    with contextlib.suppress(ImportError):
+        import diffrax
+        import jax
+
+        if not os.environ.get("COMFYUI_OCS_NO_DISABLE_JAX_PREALLOCATE"):
+            os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+        # jax.config.update("jax_enable_x64", True)
+
+        HAVE_DIFFRAX = True
 
 
 class SamplerResult:
@@ -1334,6 +1348,10 @@ class DESolverStep(SingleStepSampler, MinSigmaStepMixin):
             )
         return s, sn, sigma_down, sigma_up
 
+    @staticmethod
+    def reverse_time(t, t0, t1):
+        return t1 + (t0 - t)
+
 
 class TDEStep(DESolverStep):
     name = "tde"
@@ -1359,6 +1377,8 @@ class TDEStep(DESolverStep):
 
     def step(self, x, ss):
         s, sn, sigma_down, sigma_up = self.de_get_step(ss, x)
+        if self.de_min_sigma is not None and s <= self.de_min_sigma:
+            return (yield from self.euler_step(x, ss))
         delta = (s - sigma_down).item()
         mcc = 0
         bidx = 0
@@ -1465,6 +1485,8 @@ class TODEStep(DESolverStep):
 
     def step(self, x, ss):
         s, sn, sigma_down, sigma_up = self.de_get_step(ss, x)
+        if self.de_min_sigma is not None and s <= self.de_min_sigma:
+            return (yield from self.euler_step(x, ss))
         delta = (ss.sigma - sigma_down).item()
         mcc = 0
         pbar = None
@@ -1505,7 +1527,7 @@ class TODEStep(DESolverStep):
             total=1000, desc=self.de_solver_name, leave=True, disable=ss.disable_status
         )
 
-        term = tode.DETerm(odefn)
+        term = tode.ODETerm(odefn)
         method = self.de_solver_method(term=term)
         controller = tode.PIDController(
             term=term,
@@ -1559,6 +1581,7 @@ class TSDEStep(DESolverStep):
         de_g_multiplier=0.05,
         de_g_reverse_time=True,
         de_g_derp_mode=False,
+        de_batch_channels=True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -1572,16 +1595,19 @@ class TSDEStep(DESolverStep):
         self.de_noise_channels = de_noise_channels
         self.de_g_reverse_time = de_g_reverse_time
         self.de_g_derp_mode = de_g_derp_mode
+        self.de_batch_channels = de_batch_channels
 
     def check_solver_support(self):
         pass
 
     def step(self, x, ss):
         s, sn, sigma_down, sigma_up = self.de_get_step(ss, x)
+        if self.de_min_sigma is not None and s <= self.de_min_sigma:
+            return (yield from self.euler_step(x, ss))
         delta = (ss.sigma - sigma_down).item()
         mcc = 0
         pbar = None
-        b, c, h, w = x.shape
+        _b, c, h, w = x.shape
         outer_self = self
 
         class SDE(torch.nn.Module):
@@ -1596,7 +1622,7 @@ class TSDEStep(DESolverStep):
                 if torch.all(t <= 1e-05).item():
                     return torch.zeros_like(y_flat)
                 if mcc >= outer_self.de_max_nfe:
-                    raise RuntimeError("TDEStep: Model call limit exceeded")
+                    raise RuntimeError("TSDEStep: Model call limit exceeded")
 
                 pct = (s - t) / delta
                 pbar.n = round(pct.min().item() * 999)
@@ -1605,7 +1631,8 @@ class TSDEStep(DESolverStep):
                     f"{outer_self.de_solver_name}({mcc}/{outer_self.de_max_nfe})",
                     refresh=True,
                 )
-                y = y_flat.reshape(-1, c, h, w)
+                flat_shape = y_flat.shape
+                y = y_flat.view(1, c, h, w)
                 t32 = t.to(torch.float32)
                 del y_flat
 
@@ -1615,7 +1642,7 @@ class TSDEStep(DESolverStep):
                 else:
                     mr = ss.model(y, t32.clamp(min=1e-05), model_call_idx=mcc)
                     mcc += 1
-                return -outer_self.to_d(mr).flatten(start_dim=1)
+                return -outer_self.to_d(mr).view(*flat_shape)
 
             @torch.no_grad()
             def g(self, t_rev, y_flat):
@@ -1644,40 +1671,299 @@ class TSDEStep(DESolverStep):
         dt0 = (
             delta * self.de_initial_step if self.de_adaptive else delta / self.de_split
         )
-        sde = SDE()
-        y_flat = x.flatten(start_dim=1)
-        if sde.noise_type == "diagonal":
-            bm_size = (b, y_flat.shape[1])
-        elif sde.noise_type == "scalar":
-            bm_size = (b, 1)
-        else:
-            bm_size = (b, self.de_noise_channels)
-        bm = torchsde.BrownianInterval(
-            dtype=x.dtype,
-            device=x.device,
-            t0=-s,
-            t1=s,
-            entropy=ss.noise.seed,
-            levy_area_approximation=self.de_levy_area_approx,
-            tol=1e-06,
-            size=bm_size,
+        results = []
+        for bidx in range(x.shape[0]):
+            sde = SDE()
+            if self.de_batch_channels:
+                y_flat = x[bidx].flatten(start_dim=1)
+            else:
+                y_flat = x[bidx].unsqueeze(0).flatten(start_dim=1)
+            if sde.noise_type == "diagonal":
+                bm_size = (y_flat.shape[0], y_flat.shape[1])
+            elif sde.noise_type == "scalar":
+                bm_size = (y_flat.shape[0], 1)
+            else:
+                bm_size = (y_flat.shape[0], self.de_noise_channels)
+            bm = torchsde.BrownianInterval(
+                dtype=x.dtype,
+                device=x.device,
+                t0=-s,
+                t1=s,
+                entropy=ss.noise.seed,
+                levy_area_approximation=self.de_levy_area_approx,
+                tol=1e-06,
+                size=bm_size,
+            )
+
+            ys = torchsde.sdeint(
+                sde,
+                y_flat,
+                t,
+                method=self.de_solver_name,
+                adaptive=self.de_adaptive,
+                atol=self.de_atol,
+                rtol=self.de_rtol,
+                dt=dt0,
+                bm=bm,
+            )
+            del y_flat
+            # print("DONE", ys.shape)
+            results.append(ys[-1].view(1, c, h, w))
+            # result = ys[-1].reshape(-1, c, h, w)
+            del ys
+        result = torch.cat(results)
+        del results
+
+        sigma_up, result = yield from self.adjusted_step(ss, sn, result, mcc, sigma_up)
+        if pbar is not None:
+            pbar.n = pbar.total
+            pbar.update(0)
+            pbar.close()
+        yield from self.result(ss, result, sigma_up, sigma_down=sigma_down)
+
+
+if HAVE_DIFFRAX:
+
+    class RevVirtualBrownianTree(diffrax.VirtualBrownianTree):
+        def evaluate(self, t0, t1, *args, **kwargs):
+            if t1 is not None:
+                return super().evaluate(t1, t0, *args, **kwargs)
+            return super().evaluate(t0, t1, *args, **kwargs)
+
+
+class DiffraxStep(DESolverStep):
+    name = "diffrax"
+    model_calls = 2
+    allow_alt_cfgpp = True
+    de_default_solver = "dopri5"
+
+    def __init__(
+        self,
+        *args,
+        de_split=1,
+        de_adaptive=False,
+        de_fake_pure_callback=False,
+        de_initial_step=0.25,
+        de_ctl_pcoeff=0.3,
+        de_ctl_icoeff=0.9,
+        de_ctl_dcoeff=0.2,
+        de_g_multiplier=0.0,
+        de_half_solver=False,
+        de_batch_channels=True,
+        de_levy_area_approx="brownian_increment",
+        de_error_order=None,
+        de_sde_mode=False,
+        **kwargs,
+    ):
+        if not HAVE_DIFFRAX:
+            raise RuntimeError(
+                "TODE sampler requires torchode installed in venv. Example: pip install torchode"
+            )
+        super().__init__(*args, **kwargs)
+        solvers = dict(
+            euler=diffrax.Euler,
+            heun=diffrax.Heun,
+            midpoint=diffrax.Midpoint,
+            ralston=diffrax.Ralston,
+            bosh3=diffrax.Bosh3,
+            tost5=diffrax.Tsit5,
+            dopri5=diffrax.Dopri5,
+            dopri8=diffrax.Dopri8,
+            implicit_euler=diffrax.ImplicitEuler,
+            kvaerno3=diffrax.Kvaerno3,
+            kvaerno4=diffrax.Kvaerno4,
+            kvaerno5=diffrax.Kvaerno5,
+            semi_implicit_euler=diffrax.SemiImplicitEuler,
+            reversible_heun=diffrax.ReversibleHeun,
+            leapfrog_midpoint=diffrax.LeapfrogMidpoint,
+            euler_heun=diffrax.EulerHeun,
+            ito_milstein=diffrax.ItoMilstein,
+            stratonovich_milstein=diffrax.StratonovichMilstein,
+            sea=diffrax.SEA,
+            sra1=diffrax.SRA1,
+            shark=diffrax.ShARK,
+            general_shark=diffrax.GeneralShARK,
+            slow_rk=diffrax.SlowRK,
+            spark=diffrax.SPaRK,
+        )
+        levy_areas = dict(
+            brownian_increment=diffrax.BrownianIncrement,
+            space_time=diffrax.SpaceTimeLevyArea,
+            space_time_time=diffrax.SpaceTimeTimeLevyArea,
+        )
+        # jax.config.update("jax_disable_jit", True)
+        self.de_solver_method = solvers[self.de_solver_name]()
+        if de_half_solver:
+            self.de_solver_method = diffrax.HalfSolver(self.de_solver_method)
+        self.de_ctl_pcoeff = de_ctl_pcoeff
+        self.de_ctl_icoeff = de_ctl_icoeff
+        self.de_ctl_dcoeff = de_ctl_dcoeff
+        self.de_initial_step = de_initial_step
+        self.de_adaptive = de_adaptive
+        self.de_split = de_split
+        self.de_fake_pure_callback = de_fake_pure_callback
+        self.de_g_multiplier = de_g_multiplier
+        self.de_batch_channels = de_batch_channels
+        self.de_levy_area_approx = levy_areas[de_levy_area_approx]
+        self.de_error_order = de_error_order
+        self.de_sde_mode = de_sde_mode
+
+    # As slow and safe as possible.
+    @staticmethod
+    def t2j(t):
+        # if hasattr(torch, "cuda"):
+        #     torch.cuda.synchronize()
+        return jax.block_until_ready(
+            jax.numpy.array(numpy.array(t.detach().cpu().contiguous()))
         )
 
-        ys = torchsde.sdeint(
-            sde,
-            y_flat,
-            t,
-            method=self.de_solver_name,
-            adaptive=self.de_adaptive,
-            atol=self.de_atol,
-            rtol=self.de_rtol,
-            dt=dt0,
-            bm=bm,
-        )
-        del y_flat
-        # print("DONE", ys.shape)
-        result = ys[-1].reshape(-1, c, h, w)
-        del ys
+    @staticmethod
+    def j2t(t):
+        return torch.from_numpy(numpy.array(jax.block_until_ready(t))).contiguous()
+
+    # @staticmethod
+    # def t2j(t):
+    #     return jax.block_until_ready(
+    #         jax.dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(t.detach().clone()))
+    #     )
+
+    # @staticmethod
+    # def j2t(t):
+    #     return torch.utils.dlpack.from_dlpack(
+    #         jax.dlpack.to_dlpack(jax.block_until_ready(t), copy=True)
+    #     )
+
+    def check_solver_support(self):
+        if not HAVE_DIFFRAX:
+            raise RuntimeError(
+                "Diffrax sampler requires diffrax and jax installed in venv."
+            )
+
+    def step(self, x, ss):
+        s, sn, sigma_down, sigma_up = self.de_get_step(ss, x)
+        if self.de_min_sigma is not None and s <= self.de_min_sigma:
+            return (yield from self.euler_step(x, ss))
+        mcc = 0
+        pbar = None
+        _b, c, h, w = x.shape
+        interrupted = None
+        t0, t1 = sigma_down.item(), s.item()
+        # print("\nT", t0, t1)
+
+        def odefn_(t_orig, y_flat, args=()):
+            nonlocal mcc, interrupted
+            # t = t1 + (t0 - self.j2t(t_orig).to(s))
+            t = self.reverse_time(self.j2t(t_orig).to(s), t0, t1)
+            if t <= 1e-05:
+                return jax.numpy.zeros_like(y_flat)
+            if mcc >= self.de_max_nfe:
+                raise RuntimeError("DiffraxStep: Model call limit exceeded")
+
+            # pct = (s - t) / delta
+            # pbar.n = round(pct.min().item() * 999)
+            # pbar.update(0)
+            # pbar.set_description(
+            #     f"{self.de_solver_name}({mcc}/{self.de_max_nfe})", refresh=True
+            # )
+            y = self.j2t(y_flat.reshape(1, c, h, w)).to(x)
+            t32 = t.to(s).clamp(min=1e-05)
+            flat_shape = y_flat.shape
+            del y_flat
+
+            if not args and mcc == 0 and torch.all(t == s):
+                mr = ss.hcur
+                mcc = 1
+            else:
+                try:
+                    if not args:
+                        mr = ss.model(y, t32, model_call_idx=mcc)
+                    else:
+                        print("TANGENTS")
+                        mr = ss.model(y, t32, model_call_idx=mcc, tangents=args)
+                except comfy.model_management.InterruptProcessingException as exc:
+                    interrupted = exc
+                    raise
+                mcc += 1
+            result = self.to_d(mr).reshape(*flat_shape)
+            return self.t2j(-result)
+
+        if not self.de_fake_pure_callback:
+
+            def odefn(t, y_flat, args):
+                return jax.experimental.io_callback(
+                    odefn_, y_flat, t, y_flat, ordered=True
+                )
+        else:
+
+            def odefn(t, y_flat, args):
+                return jax.pure_callback(odefn_, y_flat, t, y_flat)
+
+        def g(t, y, _args):
+            return jax.numpy.float32(
+                self.de_g_multiplier * self.reverse_time(t, t0, t1)
+            ).broadcast((y.shape[0],))
+
+        # pbar = tqdm.tqdm(
+        #     total=1000, desc=self.de_solver_name, leave=True, disable=ss.disable_status
+        # )
+
+        term = diffrax.ODETerm(odefn)
+        method = self.de_solver_method
+        if self.de_adaptive:
+            controller = diffrax.PIDController(
+                atol=self.de_atol,
+                rtol=self.de_rtol,
+                dtmin=1e-05,
+                pcoeff=self.de_ctl_pcoeff,
+                icoeff=self.de_ctl_icoeff,
+                dcoeff=self.de_ctl_dcoeff,
+                error_order=self.de_error_order,
+            )
+        else:
+            controller = diffrax.ConstantStepSize()
+
+        if not self.de_adaptive:
+            dt0 = (t1 - t0) / self.de_split
+        else:
+            dt0 = (t1 - t0) * self.de_initial_step
+        if self.de_sde_mode:
+            bm = diffrax.VirtualBrownianTree(
+                t0,
+                t1 + 1e-06,
+                tol=1e-06,
+                levy_area=self.de_levy_area_approx,
+                shape=(c,) if self.de_batch_channels else (1,),
+                # shape=(),
+                key=jax.random.PRNGKey(ss.noise.seed),
+            )
+            term = diffrax.MultiTerm(term, diffrax.ControlTerm(g, bm))
+        results = []
+        for bidx in range(x.shape[0]):
+            if self.de_batch_channels:
+                y_flat = x[bidx].flatten(start_dim=1)
+            else:
+                y_flat = x[bidx].unsqueeze(0).flatten(start_dim=1)
+            y_flat = self.t2j(y_flat)
+            with warnings.catch_warnings(action="ignore", category=FutureWarning):
+                try:
+                    solution = diffrax.diffeqsolve(
+                        terms=term,
+                        solver=method,
+                        t0=t0,
+                        t1=t1,
+                        dt0=dt0,
+                        y0=y_flat,
+                        saveat=diffrax.SaveAt(t1=True),
+                        stepsize_controller=controller,
+                        progress_meter=diffrax.TqdmProgressMeter(refresh_steps=0),
+                    )
+                except Exception:
+                    if interrupted is not None:
+                        raise interrupted
+                    raise
+            results.append(self.j2t(solution.ys).view(*x.shape))
+            del solution
+        result = torch.cat(results).to(x)
 
         sigma_up, result = yield from self.adjusted_step(ss, sn, result, mcc, sigma_up)
         if pbar is not None:
@@ -1692,7 +1978,6 @@ class HeunStep(ReversibleSingleStepSampler):
     model_calls = 1
     default_history_limit, max_history = 0, 0
     allow_alt_cfgpp = True
-    allow_cfgpp = True
 
     def reversible_correction(self, ss, d_from, d_to):
         reta, reversible_scale = self.get_reversible_cfg(ss)
@@ -1720,7 +2005,6 @@ class Heun1SStep(HeunStep):
     name = "heun_1s"
     model_calls = 1
     allow_alt_cfgpp = True
-    allow_cfgpp = True
     default_history_limit, max_history = 1, 1
 
     def step(self, x, ss):
@@ -1760,11 +2044,12 @@ STEP_SAMPLERS = {
     "reversible_heun (1)": ReversibleHeunStep,
     "reversible_heun_1s": ReversibleHeun1SStep,
     "rk4 (3)": RK4Step,
-    "tde (variable)": TDEStep,
-    "tode (variable)": TODEStep,
+    "solver_diffrax (variable)": DiffraxStep,
+    "solver_torchdiffeq (variable)": TDEStep,
+    "solver_torchode (variable)": TODEStep,
+    "solver_torchsde (variable)": TSDEStep,
     "trapezoidal (1)": TrapezoidalStep,
     "trapezoidal_cycle (1)": TrapezoidalCycleStep,
-    "tsde (variable)": TSDEStep,
     "ttm_jvp (1)": TTMJVPStep,
 }
 

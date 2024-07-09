@@ -202,6 +202,7 @@ class ParamNode:
         "custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
         "merge_sampler": lambda v: isinstance(v, StepSamplerChain),
         "restart_custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
+        "SAMPLER": lambda _v: True,
     }
 
     @classmethod
@@ -211,14 +212,33 @@ class ParamNode:
                 "key": (tuple(cls.OCS_PARAM_TYPES.keys()),),
                 "value": (cls.WC,),
             },
-            "optional": {"params_opt": ("OCS_PARAMS",)},
+            "optional": {
+                "params_opt": ("OCS_PARAMS",),
+                "parameters": (
+                    "STRING",
+                    {
+                        "default": "# Additional YAML or JSON parameters\n",
+                        "multiline": True,
+                        "dynamicPrompts": False,
+                    },
+                ),
+            },
         }
 
-    def go(self, *, key, value, params_opt=None):
+    def go(self, *, key, value, params_opt=None, parameters=""):
         if not self.OCS_PARAM_TYPES[key](value):
             raise ValueError(f"CSamplerParam: Bad value type for key {key}")
+        if parameters:
+            extra_params = yaml.safe_load(parameters)
+            if extra_params is not None:
+                if not isinstance(extra_params, dict):
+                    raise ValueError("Parameters must be a JSON or YAML object")
+        else:
+            extra_params = None
         params = ParamGroup(items={}) if params_opt is None else params_opt.clone()
         params[key] = value
+        if extra_params is not None:
+            params[f"{key}.params"] = extra_params
         return (params,)
 
 
@@ -236,15 +256,37 @@ class MultiParamNode:
             "required": {
                 f"key_{idx}": param_keys for idx in range(1, cls.PARAM_COUNT + 1)
             },
-            "optional": {"params_opt": ("OCS_PARAMS",)}
+            "optional": {
+                "params_opt": ("OCS_PARAMS",),
+                "parameters": (
+                    "STRING",
+                    {
+                        "default": """\
+# Additional YAML or JSON parameters
+# Should be an object with key corresponding to the index of the input
+""",
+                        "multiline": True,
+                        "dynamicPrompts": False,
+                    },
+                ),
+            }
             | {
                 f"value_opt_{idx}": (ParamNode.WC,)
                 for idx in range(1, cls.PARAM_COUNT + 1)
             },
         }
 
-    def go(self, *, params_opt=None, **kwargs):
+    def go(self, *, params_opt=None, parameters="", **kwargs):
         params = ParamGroup(items={}) if params_opt is None else params_opt.clone()
+        if parameters:
+            extra_params = yaml.safe_load(parameters)
+            if extra_params is not None:
+                if not isinstance(extra_params, dict):
+                    raise ValueError("Parameters must be a JSON or YAML object")
+            else:
+                extra_params = {}
+        else:
+            extra_params = {}
         for idx in range(1, self.PARAM_COUNT + 1):
             key, value = kwargs.get(f"key_{idx}"), kwargs.get(f"value_opt_{idx}")
             if not key or value is None:
@@ -252,6 +294,10 @@ class MultiParamNode:
             if not ParamNode.OCS_PARAM_TYPES[key](value):
                 raise ValueError(f"CSamplerParamGroup: Bad value type for key {key}")
             params[key] = value
+            extra = extra_params.get(str(idx))
+            if extra is not None:
+                params[f"{key}.params"] = extra
+
         return (params,)
 
 

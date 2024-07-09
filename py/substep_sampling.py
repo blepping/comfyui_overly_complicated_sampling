@@ -383,7 +383,13 @@ class SamplerState:
     def get_ancestral_step(self, eta=1.0, sigma=None, sigma_next=None):
         sigma = self.sigma if sigma is None else sigma
         sigma_next = self.sigma_next if sigma_next is None else sigma_next
-        return get_ancestral_step(sigma, sigma_next, eta=eta if sigma_next != 0 else 0)
+        sd, su = (
+            v if isinstance(v, torch.Tensor) else sigma.new_full((1,), v)
+            for v in get_ancestral_step(
+                sigma, sigma_next, eta=eta if sigma_next != 0 else 0
+            )
+        )
+        return sd, su
 
     def clone_edit(self, **kwargs):
         obj = self.__class__.__new__(self.__class__)

@@ -102,7 +102,11 @@ def composable_sampler(
             nsc.min_sigma, nsc.max_sigma = chunk_sigmas[-1], chunk_sigmas[0]
             if noise_scale != 0:
                 restart_ns = nsc.make_caching_noise_sampler(
-                    restart_custom_noise, 1, nsc.max_sigma, nsc.min_sigma
+                    restart_custom_noise,
+                    1,
+                    nsc.max_sigma,
+                    nsc.min_sigma,
+                    allow_immiscible=False,
                 )
                 x += nsc.scale_noise(restart_ns(), noise_scale * restart_snoise)
                 del restart_ns

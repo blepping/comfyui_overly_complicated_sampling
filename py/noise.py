@@ -124,7 +124,13 @@ class ImmiscibleNoise(
         )
         dist = (latents_expanded - noise_expanded) ** 2
         dist = dist.mean(list(range(2, dist.dim()))).cpu()
-        assign_mat = scipy.optimize.linear_sum_assignment(dist, maximize=self.maximize)
+        try:
+            assign_mat = scipy.optimize.linear_sum_assignment(
+                dist, maximize=self.maximize
+            )
+        except ValueError as _exc:
+            # print("\nImmiscible: Failed optimization, skipping")
+            return noise[: latents.shape[0]]
         # print("IMM IDX", assign_mat[1])
         return noise[assign_mat[1]]
 
@@ -198,7 +204,9 @@ class NoiseSamplerCache:
             return
         self.cache[key] = noise_sampler
 
-    def make_caching_noise_sampler(self, nsobj, size, sigma, sigma_next):
+    def make_caching_noise_sampler(
+        self, nsobj, size, sigma, sigma_next, allow_immiscible=True
+    ):
         size = min(size, self.batch_size)
         cache_key = (nsobj, size)
         if self.caching:
@@ -247,6 +255,8 @@ class NoiseSamplerCache:
             return result
 
         def noise_sampler(*args, x_ref=None, refs=None, **kwargs):
+            if not allow_immiscible:
+                return noise_sampler_(*args, **kwargs)
             return self.immiscible(
                 lambda args=args, kwargs=kwargs: noise_sampler_(*args, **kwargs),
                 fallback(x_ref, self.x),
