@@ -1753,6 +1753,12 @@ class DiffraxStep(DESolverStep):
         de_levy_area_approx="brownian_increment",
         de_error_order=None,
         de_sde_mode=False,
+        de_g_reverse_time=True,
+        de_g_time_scaling=False,
+        de_g_split_time_mode=False,
+        de_normalize_to_mean=0.5,
+        de_normalize_to_x=0,
+        de_normalize_dims=(-2, -1),
         **kwargs,
     ):
         if not HAVE_DIFFRAX:
@@ -1807,6 +1813,12 @@ class DiffraxStep(DESolverStep):
         self.de_levy_area_approx = levy_areas[de_levy_area_approx]
         self.de_error_order = de_error_order
         self.de_sde_mode = de_sde_mode
+        self.de_g_reverse_time = de_g_reverse_time
+        self.de_g_time_scaling = de_g_time_scaling
+        self.de_g_split_time_mode = de_g_split_time_mode
+        self.de_normalize_to_mean = de_normalize_to_mean
+        self.de_normalize_to_x = de_normalize_to_x
+        self.de_normalize_dims = de_normalize_dims
 
     # As slow and safe as possible.
     @staticmethod
@@ -1899,9 +1911,17 @@ class DiffraxStep(DESolverStep):
                 return jax.pure_callback(odefn_, y_flat, t, y_flat)
 
         def g(t, y, _args):
-            return jax.numpy.float32(
-                self.de_g_multiplier * self.reverse_time(t, t0, t1)
-            ).broadcast((y.shape[0],))
+            if self.de_g_split_time_mode:
+                val = jax.lax.cond(
+                    t < t0 + (t1 - t0) * 0.5,
+                    lambda: self.de_g_multiplier,
+                    lambda: -self.de_g_multiplier,
+                )
+            else:
+                val = self.de_g_multiplier
+            if self.de_g_time_scaling:
+                val *= self.reverse_time(t, t0, t1) if self.de_g_reverse_time else t
+            return jax.numpy.float32(val).broadcast((y.shape[0],))
 
         # pbar = tqdm.tqdm(
         #     total=1000, desc=self.de_solver_name, leave=True, disable=ss.disable_status
@@ -1944,7 +1964,8 @@ class DiffraxStep(DESolverStep):
             else:
                 y_flat = x[bidx].unsqueeze(0).flatten(start_dim=1)
             y_flat = self.t2j(y_flat)
-            with warnings.catch_warnings(action="ignore", category=FutureWarning):
+            with warnings.catch_warnings():
+                warnings.simplefilter(action="ignore", category=FutureWarning)
                 try:
                     solution = diffrax.diffeqsolve(
                         terms=term,
@@ -1964,6 +1985,15 @@ class DiffraxStep(DESolverStep):
             results.append(self.j2t(solution.ys).view(*x.shape))
             del solution
         result = torch.cat(results).to(x)
+        if self.de_normalize_to_mean != 0:
+            rmean = result.mean(dim=self.de_normalize_dims, keepdim=True)
+            # print("MEAN", rmean)
+            result -= rmean * self.de_normalize_to_mean
+            if self.de_normalize_to_x != 0:
+                result += (
+                    x.mean(dim=self.de_normalize_dims, keepdim=True)
+                    * self.de_normalize_to_x
+                )
 
         sigma_up, result = yield from self.adjusted_step(ss, sn, result, mcc, sigma_up)
         if pbar is not None:
