@@ -8,5 +8,6 @@ NODE_CLASS_MAPPINGS = {
     "OCS Param": nodes.ParamNode,
     "OCS MultiParam": nodes.MultiParamNode,
     "OCS ModelSetMaxSigma": nodes.ModelSetMaxSigmaNode,
+    "OCS SimpleRestartSchedule": nodes.SimpleRestartSchedule,
 }
 __all__ = ["NODE_CLASS_MAPPINGS"]

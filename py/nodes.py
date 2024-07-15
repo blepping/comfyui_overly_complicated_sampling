@@ -4,8 +4,9 @@ import comfy
 
 from .sampling import composable_sampler
 from .substep_sampling import StepSamplerChain, StepSamplerGroups, ParamGroup
-from .substep_samplers import STEP_SAMPLERS
+from .step_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
+from .utils import Restart
 
 DEFAULT_YAML_PARAMS = """\
 # JSON or YAML parameters
@@ -301,13 +302,47 @@ class MultiParamNode:
         return (params,)
 
 
-# class SimpleRestartSchedule:
-#     @classmethod
-#     def INPUT_TYPES(cls):
-#         return {
-#             "required": {"sigmas": ("SIGMAS",)},
-#             "optional": {"segments": ("STRING", {"default": "10+4x2"})},
-#         }
+class SimpleRestartSchedule:
+    RETURN_TYPES = ("SIGMAS",)
+    CATEGORY = "sampling/custom_sampling/OCS"
+    FUNCTION = "go"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sigmas": ("SIGMAS",),
+                "start_step": ("INT", {"min": 0, "default": 0}),
+            },
+            "optional": {
+                "schedule": (
+                    "STRING",
+                    {
+                        "default": """\
+# YAML or JSON restart schedule
+# Every 5 steps, jump back 3 steps
+- [5, -3]
+# Jump to schedule item 0
+- 0
+""",
+                        "multiline": True,
+                        "dynamicPrompts": False,
+                    },
+                ),
+            },
+        }
+
+    def go(self, *, sigmas, start_step=0, schedule="[]"):
+        if schedule:
+            parsed_schedule = yaml.safe_load(schedule)
+            if parsed_schedule is not None:
+                if not isinstance(parsed_schedule, (list, tuple)):
+                    raise ValueError("Schedule must be a JSON or YAML list")
+            else:
+                parsed_schedule = []
+        else:
+            parsed_schedule = []
+        return (Restart.simple_schedule(sigmas, start_step, parsed_schedule),)
 
 
 class ModelSetMaxSigmaNode:

@@ -23,6 +23,13 @@ class ImmiscibleNoise(
         defaults=(0, "x", "channels", 1.0, False, 1.0, False),
     )
 ):
+    @classmethod
+    def __new__(cls, *args, **kwargs):
+        obj = super().__new__(*args, **kwargs)
+        ref = obj.ref.split(None)
+        ref.reverse()
+        return obj._replace(ref=ref)
+
     def __call__(self, noise_sampler, x_ref, refs=None):
         if (
             self.size == 0
@@ -52,8 +59,7 @@ class ImmiscibleNoise(
         return ref
 
     def custom_ref(self, refs):
-        ops = self.ref.split(None)
-        ops.reverse()
+        ops = self.ref.copy()
         result = refs.get(ops.pop())
         if result is None:
             raise ValueError("Bad custom refs: must start with a value")
@@ -205,7 +211,12 @@ class NoiseSamplerCache:
         self.cache[key] = noise_sampler
 
     def make_caching_noise_sampler(
-        self, nsobj, size, sigma, sigma_next, allow_immiscible=True
+        self,
+        nsobj,
+        size,
+        sigma,
+        sigma_next,
+        immiscible=None,
     ):
         size = min(size, self.batch_size)
         cache_key = (nsobj, size)
@@ -233,6 +244,8 @@ class NoiseSamplerCache:
         orig_h, orig_w = self.x.shape[-2:]
         remain = 0
         noise = None
+        if immiscible is None:
+            immiscible = self.immiscible
 
         def noise_sampler_(
             *_unused,
@@ -255,9 +268,9 @@ class NoiseSamplerCache:
             return result
 
         def noise_sampler(*args, x_ref=None, refs=None, **kwargs):
-            if not allow_immiscible:
+            if immiscible is False:
                 return noise_sampler_(*args, **kwargs)
-            return self.immiscible(
+            return immiscible(
                 lambda args=args, kwargs=kwargs: noise_sampler_(*args, **kwargs),
                 fallback(x_ref, self.x),
                 refs=refs,

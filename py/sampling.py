@@ -2,33 +2,11 @@ import torch
 from tqdm.auto import trange
 
 
+from .model import ModelCallCache
 from .noise import NoiseSamplerCache
-from .substep_sampling import SamplerState, ModelCallCache
+from .substep_sampling import SamplerState
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
-
-
-def restart_get_segment(sigmas: torch.Tensor) -> torch.Tensor:
-    last_sigma = sigmas[0]
-    for idx in range(1, len(sigmas)):
-        sigma = sigmas[idx]
-        if sigma > last_sigma:
-            return sigmas[:idx]
-        last_sigma = sigma
-    return sigmas
-
-
-def restart_split_sigmas(sigmas):
-    prev_seg = None
-    while len(sigmas) > 1:
-        seg = restart_get_segment(sigmas)
-        sigmas = sigmas[len(seg) :]
-        if prev_seg is not None and seg[0] > prev_seg[-1]:
-            s_min, s_max = prev_seg[-1], seg[0]
-            noise_scale = ((s_max**2 - s_min**2) ** 0.5).item()
-        else:
-            noise_scale = 0.0
-        prev_seg = seg
-        yield (noise_scale, seg)
+from .utils import Restart
 
 
 def composable_sampler(
@@ -53,7 +31,12 @@ def composable_sampler(
         def noise_sampler(_s, _sn):
             return torch.randn_like(x)
 
-    restart_custom_noise = copts.get("restart_custom_noise")
+    restart_params = copts.get("restart", {})
+    restart = Restart(
+        s_noise=restart_params.get("s_noise", 1.0),
+        custom_noise=copts.get("restart_custom_noise"),
+        immiscible=restart_params.get("immiscible", False),
+    )
 
     ss = SamplerState(
         ModelCallCache(
@@ -86,29 +69,34 @@ def composable_sampler(
         **copts.get("noise", {}),
     )
     ss.noise = nsc
-    sigma_chunks = tuple(restart_split_sigmas(sigmas))
+    sigma_chunks = tuple(restart.split_sigmas(sigmas))
     step_count = sum(len(chunk) - 1 for _noise, chunk in sigma_chunks)
     step = 0
     restart_snoise = copts.get("restart_s_noise", 1.0)
-    with trange(step_count, leave=True, disable=ss.disable_status) as pbar:
+    with trange(step_count, disable=ss.disable_status) as pbar:
         for noise_scale, chunk_sigmas in sigma_chunks:
             ss.sigmas = chunk_sigmas
             ss.update(0, step=step)
             if step != 0:
+                hcur = ss.hcur
                 nsc.reset_cache()
                 ss.hist.reset()
                 for ms in merge_samplers:
                     ms.reset()
             nsc.min_sigma, nsc.max_sigma = chunk_sigmas[-1], chunk_sigmas[0]
-            if noise_scale != 0:
-                restart_ns = nsc.make_caching_noise_sampler(
-                    restart_custom_noise,
-                    1,
-                    nsc.max_sigma,
-                    nsc.min_sigma,
-                    allow_immiscible=False,
+            if step != 0 and noise_scale != 0:
+                restart_ns = restart.get_noise_sampler(nsc)
+                x += nsc.scale_noise(
+                    restart_ns(
+                        refs={
+                            "x": x,
+                            "denoised": hcur.denoised,
+                            "sigma": chunk_sigmas[0],
+                            "sigma_next": chunk_sigmas[1],
+                        }
+                    ),
+                    noise_scale * restart_snoise,
                 )
-                x += nsc.scale_noise(restart_ns(), noise_scale * restart_snoise)
                 del restart_ns
             for idx in range(len(chunk_sigmas) - 1):
                 if idx > 0:
@@ -126,7 +114,6 @@ def composable_sampler(
                     f"{merge_sampler.name}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03}"
                 )
                 x = merge_sampler.step(x)
-                # ss.xhist.push(x)
                 if (idx + 1) % nsc.cache_reset_interval == 0:
                     nsc.reset_cache()
                 step += 1

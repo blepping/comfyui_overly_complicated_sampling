@@ -1,6 +1,8 @@
 import contextlib
+import inspect
 import math
 import os
+import typing
 import warnings
 
 import torch
@@ -14,8 +16,11 @@ from comfy.k_diffusion.sampling import (
     to_d,
 )
 
+from .latent import Normalize
+from .noise import ImmiscibleNoise
 from .res_support import _de_second_order
 from .utils import find_first_unsorted, extract_pred, fallback
+
 
 HAVE_DIFFRAX = HAVE_TDE = HAVE_TODE = False
 
@@ -92,7 +97,7 @@ class SamplerResult:
                 ("sigma_down", "sigma_down"),
                 ("sigma_up", "sigma_up"),
             )
-            if getattr(self, ak) is not None
+            if getattr(self, ak, None) is not None
         }
         return self.noise_sampler(
             self.sigma,
@@ -138,10 +143,13 @@ class SamplerResult:
             "noise_sampler",
             "final",
             "denoised",
+            "denoised_uncond",
+            "denoised_cond",
             "noise_pred",
             "x_",
         ):
-            setattr(obj, k, getattr(self, k))
+            if hasattr(self, k):
+                setattr(obj, k, getattr(self, k))
         return obj
 
 
@@ -164,6 +172,7 @@ class SingleStepSampler(CFGPPStepMixin):
     model_calls = 0
     ancestralize = False
     sample_sigma_zero = False
+    immiscible = None
 
     def __init__(
         self,
@@ -175,6 +184,8 @@ class SingleStepSampler(CFGPPStepMixin):
         dyn_eta_start=None,
         dyn_eta_end=None,
         weight=1.0,
+        normalize=(),
+        immiscible=None,
         **kwargs,
     ):
         self.options = kwargs
@@ -184,12 +195,27 @@ class SingleStepSampler(CFGPPStepMixin):
         self.dyn_eta_start = dyn_eta_start
         self.dyn_eta_end = dyn_eta_end
         self.noise_sampler = noise_sampler
+        self.immiscible = (
+            ImmiscibleNoise(**immiscible)
+            if immiscible not in (False, None)
+            else immiscible
+        )
         self.weight = weight
         self.substeps = substeps
+        if isinstance(normalize, dict):
+            normalize = (normalize,)
+        if normalize:
+            normalize = tuple(Normalize(**cfg) for cfg in normalize)
+        else:
+            normalize = ()
+        self.normalize = normalize
 
     def __call__(self, x, ss):
+        orig_x = x
         if not self.sample_sigma_zero and ss.sigma_next == 0:
             return (yield from self.denoised_result(ss))
+        for n in self.normalize:
+            x = n(ss, ss.sigma, x, "before")
         next_x = None
         sg = self.step(x, ss)
         with contextlib.suppress(StopIteration):
@@ -198,6 +224,11 @@ class SingleStepSampler(CFGPPStepMixin):
                 if sr.final:
                     if self.ancestralize:
                         sr = self.ancestralize_result(ss, sr)
+                    curr_x = sr.x
+                    for n in self.normalize:
+                        curr_x = n(ss, ss.sigma, curr_x, "after", orig_x=orig_x)
+                    if not torch.equal(curr_x, sr.x):
+                        sr.x_ = curr_x
                     return (yield sr)
                 next_x = sr.x
                 yield sr
@@ -1372,7 +1403,7 @@ class TDEStep(DESolverStep):
     def check_solver_support(self):
         if not HAVE_TDE:
             raise RuntimeError(
-                "TODE sampler requires torchdiffeq installed in venv. Example: pip install torchdiffeq"
+                "TDE sampler requires torchdiffeq installed in venv. Example: pip install torchdiffeq"
             )
 
     def step(self, x, ss):
@@ -1730,6 +1761,24 @@ if HAVE_DIFFRAX:
                 return super().evaluate(t1, t0, *args, **kwargs)
             return super().evaluate(t0, t1, *args, **kwargs)
 
+    class StepCallbackTqdmProgressMeter(diffrax.TqdmProgressMeter):
+        step_callback: typing.Callable = None
+
+        def _init_bar(self, *args, **kwargs):
+            if self.step_callback is None:
+                return super()._init_bar(*args, **kwargs)
+            bar_format = "{percentage:.2f}%{step_callback}|{bar}| [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+            step_callback = self.step_callback
+
+            class WrapTqdm(tqdm.tqdm):
+                @property
+                def format_dict(self):
+                    d = super().format_dict
+                    d.update(step_callback=step_callback())
+                    return d
+
+            return WrapTqdm(total=100, unit="%", bar_format=bar_format)
+
 
 class DiffraxStep(DESolverStep):
     name = "diffrax"
@@ -1742,29 +1791,22 @@ class DiffraxStep(DESolverStep):
         *args,
         de_split=1,
         de_adaptive=False,
-        de_fake_pure_callback=False,
+        de_fake_pure_callback=True,
         de_initial_step=0.25,
         de_ctl_pcoeff=0.3,
         de_ctl_icoeff=0.9,
         de_ctl_dcoeff=0.2,
         de_g_multiplier=0.0,
         de_half_solver=False,
-        de_batch_channels=True,
+        de_batch_channels=False,
         de_levy_area_approx="brownian_increment",
         de_error_order=None,
         de_sde_mode=False,
-        de_g_reverse_time=True,
+        de_g_reverse_time=False,
         de_g_time_scaling=False,
         de_g_split_time_mode=False,
-        de_normalize_to_mean=0.5,
-        de_normalize_to_x=0,
-        de_normalize_dims=(-2, -1),
         **kwargs,
     ):
-        if not HAVE_DIFFRAX:
-            raise RuntimeError(
-                "TODE sampler requires torchode installed in venv. Example: pip install torchode"
-            )
         super().__init__(*args, **kwargs)
         solvers = dict(
             euler=diffrax.Euler,
@@ -1772,13 +1814,13 @@ class DiffraxStep(DESolverStep):
             midpoint=diffrax.Midpoint,
             ralston=diffrax.Ralston,
             bosh3=diffrax.Bosh3,
-            tost5=diffrax.Tsit5,
+            tsit5=diffrax.Tsit5,
             dopri5=diffrax.Dopri5,
             dopri8=diffrax.Dopri8,
             implicit_euler=diffrax.ImplicitEuler,
-            kvaerno3=diffrax.Kvaerno3,
-            kvaerno4=diffrax.Kvaerno4,
-            kvaerno5=diffrax.Kvaerno5,
+            # kvaerno3=diffrax.Kvaerno3,
+            # kvaerno4=diffrax.Kvaerno4,
+            # kvaerno5=diffrax.Kvaerno5,
             semi_implicit_euler=diffrax.SemiImplicitEuler,
             reversible_heun=diffrax.ReversibleHeun,
             leapfrog_midpoint=diffrax.LeapfrogMidpoint,
@@ -1816,15 +1858,10 @@ class DiffraxStep(DESolverStep):
         self.de_g_reverse_time = de_g_reverse_time
         self.de_g_time_scaling = de_g_time_scaling
         self.de_g_split_time_mode = de_g_split_time_mode
-        self.de_normalize_to_mean = de_normalize_to_mean
-        self.de_normalize_to_x = de_normalize_to_x
-        self.de_normalize_dims = de_normalize_dims
 
     # As slow and safe as possible.
     @staticmethod
     def t2j(t):
-        # if hasattr(torch, "cuda"):
-        #     torch.cuda.synchronize()
         return jax.block_until_ready(
             jax.numpy.array(numpy.array(t.detach().cpu().contiguous()))
         )
@@ -1832,18 +1869,6 @@ class DiffraxStep(DESolverStep):
     @staticmethod
     def j2t(t):
         return torch.from_numpy(numpy.array(jax.block_until_ready(t))).contiguous()
-
-    # @staticmethod
-    # def t2j(t):
-    #     return jax.block_until_ready(
-    #         jax.dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(t.detach().clone()))
-    #     )
-
-    # @staticmethod
-    # def j2t(t):
-    #     return torch.utils.dlpack.from_dlpack(
-    #         jax.dlpack.to_dlpack(jax.block_until_ready(t), copy=True)
-    #     )
 
     def check_solver_support(self):
         if not HAVE_DIFFRAX:
@@ -1856,27 +1881,17 @@ class DiffraxStep(DESolverStep):
         if self.de_min_sigma is not None and s <= self.de_min_sigma:
             return (yield from self.euler_step(x, ss))
         mcc = 0
-        pbar = None
         _b, c, h, w = x.shape
         interrupted = None
         t0, t1 = sigma_down.item(), s.item()
-        # print("\nT", t0, t1)
 
         def odefn_(t_orig, y_flat, args=()):
             nonlocal mcc, interrupted
-            # t = t1 + (t0 - self.j2t(t_orig).to(s))
             t = self.reverse_time(self.j2t(t_orig).to(s), t0, t1)
             if t <= 1e-05:
                 return jax.numpy.zeros_like(y_flat)
             if mcc >= self.de_max_nfe:
                 raise RuntimeError("DiffraxStep: Model call limit exceeded")
-
-            # pct = (s - t) / delta
-            # pbar.n = round(pct.min().item() * 999)
-            # pbar.update(0)
-            # pbar.set_description(
-            #     f"{self.de_solver_name}({mcc}/{self.de_max_nfe})", refresh=True
-            # )
             y = self.j2t(y_flat.reshape(1, c, h, w)).to(x)
             t32 = t.to(s).clamp(min=1e-05)
             flat_shape = y_flat.shape
@@ -1921,11 +1936,12 @@ class DiffraxStep(DESolverStep):
                 val = self.de_g_multiplier
             if self.de_g_time_scaling:
                 val *= self.reverse_time(t, t0, t1) if self.de_g_reverse_time else t
+            if not self.de_batch_channels:
+                return val
             return jax.numpy.float32(val).broadcast((y.shape[0],))
 
-        # pbar = tqdm.tqdm(
-        #     total=1000, desc=self.de_solver_name, leave=True, disable=ss.disable_status
-        # )
+        def progress_callback():
+            return f" ({mcc:>3}/{self.de_max_nfe:>3}) {self.de_solver_name}"
 
         term = diffrax.ODETerm(odefn)
         method = self.de_solver_method
@@ -1948,13 +1964,14 @@ class DiffraxStep(DESolverStep):
             dt0 = (t1 - t0) * self.de_initial_step
         if self.de_sde_mode:
             bm = diffrax.VirtualBrownianTree(
-                t0,
-                t1 + 1e-06,
+                # t0,
+                # t1 + 1e-06,
+                t0=ss.sigmas.min().item(),
+                t1=ss.sigmas.max().item(),
                 tol=1e-06,
                 levy_area=self.de_levy_area_approx,
-                shape=(c,) if self.de_batch_channels else (1,),
-                # shape=(),
-                key=jax.random.PRNGKey(ss.noise.seed),
+                shape=(c,) if self.de_batch_channels else (),
+                key=jax.random.PRNGKey(ss.noise.seed + ss.noise.seed_offset),
             )
             term = diffrax.MultiTerm(term, diffrax.ControlTerm(g, bm))
         results = []
@@ -1976,7 +1993,10 @@ class DiffraxStep(DESolverStep):
                         y0=y_flat,
                         saveat=diffrax.SaveAt(t1=True),
                         stepsize_controller=controller,
-                        progress_meter=diffrax.TqdmProgressMeter(refresh_steps=0),
+                        progress_meter=StepCallbackTqdmProgressMeter(
+                            step_callback=progress_callback,
+                            refresh_steps=1,
+                        ),
                     )
                 except Exception:
                     if interrupted is not None:
@@ -1985,21 +2005,7 @@ class DiffraxStep(DESolverStep):
             results.append(self.j2t(solution.ys).view(*x.shape))
             del solution
         result = torch.cat(results).to(x)
-        if self.de_normalize_to_mean != 0:
-            rmean = result.mean(dim=self.de_normalize_dims, keepdim=True)
-            # print("MEAN", rmean)
-            result -= rmean * self.de_normalize_to_mean
-            if self.de_normalize_to_x != 0:
-                result += (
-                    x.mean(dim=self.de_normalize_dims, keepdim=True)
-                    * self.de_normalize_to_x
-                )
-
         sigma_up, result = yield from self.adjusted_step(ss, sn, result, mcc, sigma_up)
-        if pbar is not None:
-            pbar.n = pbar.total
-            pbar.update(0)
-            pbar.close()
         yield from self.result(ss, result, sigma_up, sigma_down=sigma_down)
 
 
@@ -2052,8 +2058,60 @@ class Heun1SStep(HeunStep):
         yield from self.result(ss, result, su)
 
 
+class AdapterStep(SingleStepSampler):
+    name = "adapter"
+    model_calls = 2
+    immiscible = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.external_sampler = self.options.pop(
+            "SAMPLER", comfy.samplers.sampler_object("euler")
+        )
+        sig = inspect.signature(self.external_sampler.sampler_function)
+        self.external_sampler_options = {
+            k: v
+            for k, v in self.options.pop("external_sampler", {}).items()
+            if k in sig.parameters
+        }
+        self.external_sampler_uses_noise = "noise_sampler" in sig.parameters
+        self.ancestralize = self.options.pop("ancestralize", self.ancestralize) is True
+
+    def step(self, x, ss):
+        sigmas = ss.sigmas[ss.idx : ss.idx + 2]
+        kwargs = {
+            "callback": None,
+            "disable": True,
+            "extra_args": {"seed": ss.noise.seed + ss.noise.seed_offset},
+        } | self.external_sampler_options
+        if self.external_sampler_uses_noise:
+            kwargs["noise_sampler"] = ss.noise.make_caching_noise_sampler(
+                self.options.get("custom_noise"),
+                1,
+                sigmas[-1],
+                sigmas[0],
+                immiscible=fallback(self.immiscible, ss.noise.immiscible),
+            )
+
+        mcc = 1
+
+        def model_wrapper(x_, sigma_, *args, **kwargs):
+            nonlocal mcc
+            if torch.equal(x_, x) and sigma_ == ss.sigma:
+                return ss.hcur.denoised.clone()
+            mr = ss.model(x_, sigma_, *args, model_call_idx=mcc, **kwargs)
+            mcc += 1
+            return mr.denoised.clone()
+
+        result = self.external_sampler.sampler_function(
+            model_wrapper, x.clone(), sigmas, **kwargs
+        )
+        yield from self.result(ss, result, ss.sigma.new_zeros(1))
+
+
 STEP_SAMPLERS = {
     "default (euler)": EulerStep,
+    "adapter (variable)": AdapterStep,
     "bogacki (2)": BogackiStep,
     "deis": DEISStep,
     "dpmpp_2m_sde": DPMPP2MSDEStep,
