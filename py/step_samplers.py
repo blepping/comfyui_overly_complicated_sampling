@@ -1490,7 +1490,7 @@ class TODEStep(DESolverStep):
         self,
         *args,
         de_initial_step=0.25,
-        de_compile=False,
+        tode_compile=False,
         de_ctl_pcoeff=0.3,
         de_ctl_icoeff=0.9,
         de_ctl_dcoeff=0.2,
@@ -1505,7 +1505,7 @@ class TODEStep(DESolverStep):
         self.de_ctl_pcoeff = de_ctl_pcoeff
         self.de_ctl_icoeff = de_ctl_icoeff
         self.de_ctl_dcoeff = de_ctl_dcoeff
-        self.de_compile = de_compile
+        self.de_compile = tode_compile
         self.de_initial_step = de_initial_step
 
     def check_solver_support(self):
@@ -1605,28 +1605,28 @@ class TSDEStep(DESolverStep):
         de_initial_step=0.25,
         de_split=1,
         de_adaptive=False,
-        de_noise_type="scalar",
-        de_sde_type="stratonovich",
-        de_levy_area_approx="none",
-        de_noise_channels=1,
-        de_g_multiplier=0.05,
-        de_g_reverse_time=True,
-        de_g_derp_mode=False,
-        de_batch_channels=True,
+        tsde_noise_type="scalar",
+        tsde_sde_type="stratonovich",
+        tsde_levy_area_approx="none",
+        tsde_noise_channels=1,
+        tsde_g_multiplier=0.05,
+        tsde_g_reverse_time=True,
+        tsde_g_derp_mode=False,
+        tsde_batch_channels=True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.de_initial_step = de_initial_step
         self.de_adaptive = de_adaptive
         self.de_split = de_split
-        self.de_noise_type = de_noise_type
-        self.de_sde_type = de_sde_type
-        self.de_levy_area_approx = de_levy_area_approx
-        self.de_g_multiplier = de_g_multiplier
-        self.de_noise_channels = de_noise_channels
-        self.de_g_reverse_time = de_g_reverse_time
-        self.de_g_derp_mode = de_g_derp_mode
-        self.de_batch_channels = de_batch_channels
+        self.de_noise_type = tsde_noise_type
+        self.de_sde_type = tsde_sde_type
+        self.de_levy_area_approx = tsde_levy_area_approx
+        self.de_g_multiplier = tsde_g_multiplier
+        self.de_noise_channels = tsde_noise_channels
+        self.de_g_reverse_time = tsde_g_reverse_time
+        self.de_g_derp_mode = tsde_g_derp_mode
+        self.de_batch_channels = tsde_batch_channels
 
     def check_solver_support(self):
         pass
@@ -1790,21 +1790,21 @@ class DiffraxStep(DESolverStep):
         self,
         *args,
         de_split=1,
-        de_adaptive=False,
-        de_fake_pure_callback=True,
         de_initial_step=0.25,
         de_ctl_pcoeff=0.3,
         de_ctl_icoeff=0.9,
         de_ctl_dcoeff=0.2,
-        de_g_multiplier=0.0,
-        de_half_solver=False,
-        de_batch_channels=False,
-        de_levy_area_approx="brownian_increment",
-        de_error_order=None,
-        de_sde_mode=False,
-        de_g_reverse_time=False,
-        de_g_time_scaling=False,
-        de_g_split_time_mode=False,
+        diffrax_adaptive=False,
+        diffrax_fake_pure_callback=True,
+        diffrax_g_multiplier=0.0,
+        diffrax_half_solver=False,
+        diffrax_batch_channels=False,
+        diffrax_levy_area_approx="brownian_increment",
+        diffrax_error_order=None,
+        diffrax_sde_mode=False,
+        diffrax_g_reverse_time=False,
+        diffrax_g_time_scaling=False,
+        diffrax_g_split_time_mode=False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -1841,23 +1841,23 @@ class DiffraxStep(DESolverStep):
         )
         # jax.config.update("jax_disable_jit", True)
         self.de_solver_method = solvers[self.de_solver_name]()
-        if de_half_solver:
+        if diffrax_half_solver:
             self.de_solver_method = diffrax.HalfSolver(self.de_solver_method)
         self.de_ctl_pcoeff = de_ctl_pcoeff
         self.de_ctl_icoeff = de_ctl_icoeff
         self.de_ctl_dcoeff = de_ctl_dcoeff
         self.de_initial_step = de_initial_step
-        self.de_adaptive = de_adaptive
+        self.de_adaptive = diffrax_adaptive
         self.de_split = de_split
-        self.de_fake_pure_callback = de_fake_pure_callback
-        self.de_g_multiplier = de_g_multiplier
-        self.de_batch_channels = de_batch_channels
-        self.de_levy_area_approx = levy_areas[de_levy_area_approx]
-        self.de_error_order = de_error_order
-        self.de_sde_mode = de_sde_mode
-        self.de_g_reverse_time = de_g_reverse_time
-        self.de_g_time_scaling = de_g_time_scaling
-        self.de_g_split_time_mode = de_g_split_time_mode
+        self.de_fake_pure_callback = diffrax_fake_pure_callback
+        self.de_g_multiplier = diffrax_g_multiplier
+        self.de_batch_channels = diffrax_batch_channels
+        self.de_levy_area_approx = levy_areas[diffrax_levy_area_approx]
+        self.de_error_order = diffrax_error_order
+        self.de_sde_mode = diffrax_sde_mode
+        self.de_g_reverse_time = diffrax_g_reverse_time
+        self.de_g_time_scaling = diffrax_g_time_scaling
+        self.de_g_split_time_mode = diffrax_g_split_time_mode
 
     # As slow and safe as possible.
     @staticmethod
