@@ -23,7 +23,7 @@ Symbols (simple string type) are defined using `'symbol_name` - note the solitar
 
 Indexes like `step` are zero-based: `0` will be the first step.
 
-**Basic Variables**
+### Basic Variables
 
 * `default`: Context specific default value. i.e. if used in an `input` expression this would be `x`, if used for `output` this would be the current result.
 * `step`: Current step.
@@ -41,7 +41,7 @@ Indexes like `step` are zero-based: `0` will be the first step.
 * `step_pct`: Percentage for the current step (based on total steps).
 * `total_steps`: Total steps to be sampled.
 
-**Extended Variables**
+### Extended Variables
 
 * `denoised`: From the current step or substep. May not be available in model `input` or group `pre_filter`.
 * `cond`: From the current step or substep. May not be available in model `input` or group `pre_filter`.
@@ -49,12 +49,12 @@ Indexes like `step` are zero-based: `0` will be the first step.
 * `denoised_prev`: Only available when model history exists.
 * `cond_prev`: Only available when model history exists.
 * `cond_prev`: Only available when model history exists.
+
+### Model Filter Variables
+
 * `model_call`: Only applicable to `model` filters, will be the model call index. I.E. if the sampler calls the model three times, the filter would be called with model call indexes `0`, `1` and `2`.
-* `x`
 
-**Model Output Expressions**
-
-Only available in model output expressions (after a model result is available).
+Available in model filters, with the exception of the `input` filter.
 
 * `denoised_curr`
 * `cond_curr`

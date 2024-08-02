@@ -13,6 +13,9 @@ Set via the `pre_filter` and `post_filter` keys.
 
 Set via the `pre_filter` and `post_filter` keys.
 
+*Note*: Since the group pre-filter may be called before any model calls, variables like `denoised` may not be available
+in expressions.
+
 ### `OCS Sampler`
 
 **Noise**
@@ -24,6 +27,10 @@ noise:
 ```
 
 **Model**
+
+*Note*: Since the model filters may be called before any other model calls, variables like `denoised` may not be available
+in expressions. With the exception of the `input` filter you will have access to `denoised_curr`, `cond_curr`, etc.
+See [Expressions](expression.md#model-filter-variables).
 
 ```yaml
 model:
