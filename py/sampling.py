@@ -2,11 +2,22 @@ import torch
 from tqdm.auto import trange
 
 
+from .filtering import FILTER_HANDLERS
 from .model import ModelCallCache
 from .noise import NoiseSamplerCache
 from .substep_sampling import SamplerState
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
-from .utils import Restart
+from .restart import Restart
+
+
+def find_merge_sampler(merge_samplers, ss) -> object | None:
+    handlers = None
+    for merge_sampler in merge_samplers:
+        if merge_sampler.when is not None and handlers is None:
+            handlers = FILTER_HANDLERS.clone_with_refs(ss.refs)
+        if merge_sampler.check_match(handlers, ss=ss):
+            return merge_sampler
+    return None
 
 
 def composable_sampler(
@@ -44,7 +55,7 @@ def composable_sampler(
             x,
             x.new_ones((x.shape[0],)),
             extra_args,
-            **copts.get("model_call_cache", {}),
+            **copts.get("model", {}),
         ),
         sigmas,
         0,
@@ -58,8 +69,7 @@ def composable_sampler(
     )
     groups = copts["_groups"]
     merge_samplers = tuple(
-        MERGE_SUBSTEPS_CLASSES[g.merge_method](ss, g.items, **g.options)
-        for g in groups.items
+        MERGE_SUBSTEPS_CLASSES[g.merge_method](ss, g) for g in groups.items
     )
     nsc = NoiseSamplerCache(
         x,
@@ -71,14 +81,14 @@ def composable_sampler(
     ss.noise = nsc
     sigma_chunks = tuple(restart.split_sigmas(sigmas))
     step_count = sum(len(chunk) - 1 for _noise, chunk in sigma_chunks)
+    ss.total_steps = step_count
     step = 0
     restart_snoise = copts.get("restart_s_noise", 1.0)
     with trange(step_count, disable=ss.disable_status) as pbar:
         for noise_scale, chunk_sigmas in sigma_chunks:
             ss.sigmas = chunk_sigmas
-            ss.update(0, step=step)
+            ss.update(0, step=step, substep=0)
             if step != 0:
-                hcur = ss.hcur
                 nsc.reset_cache()
                 ss.hist.reset()
                 for ms in merge_samplers:
@@ -87,33 +97,25 @@ def composable_sampler(
             if step != 0 and noise_scale != 0:
                 restart_ns = restart.get_noise_sampler(nsc)
                 x += nsc.scale_noise(
-                    restart_ns(
-                        refs={
-                            "x": x,
-                            "denoised": hcur.denoised,
-                            "sigma": chunk_sigmas[0],
-                            "sigma_next": chunk_sigmas[1],
-                        }
-                    ),
+                    restart_ns(refs=ss.refs),
                     noise_scale * restart_snoise,
                 )
                 del restart_ns
             for idx in range(len(chunk_sigmas) - 1):
                 if idx > 0:
-                    ss.update(idx, step=step)
+                    ss.update(idx, step=step, substep=0)
                 # print(
                 #     f"STEP {step + 1:>3}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03} || up={ss.sigma_up.item():.03}, down={ss.sigma_down.item():.03}"
                 # )
                 ss.model.reset_cache()
                 nsc.update_x(x)
-                ms_idx = groups.find_match(ss.sigma, step, step_count)
-                if ms_idx is None:
+                merge_sampler = find_merge_sampler(merge_samplers, ss)
+                if merge_sampler is None:
                     raise RuntimeError(f"No matching sampler group for step {step + 1}")
-                merge_sampler = merge_samplers[ms_idx]
                 pbar.set_description(
                     f"{merge_sampler.name}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03}"
                 )
-                x = merge_sampler.step(x)
+                x = merge_sampler(x)
                 if (idx + 1) % nsc.cache_reset_interval == 0:
                     nsc.reset_cache()
                 step += 1

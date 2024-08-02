@@ -4,18 +4,6 @@ Experimental and mathematically unsound (but fun!) sampling for [ComfyUI](https:
 
 **Status**: In flux, may be useful but likely to change/break workflows frequently. Mainly for advanced users.
 
-## Credits
-
-I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
-
-* Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
-* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4 and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-* TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
-* IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
-* Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and idea for sampling with it from https://github.com/Clybius
-
-This repo wouldn't be possible without building on the work of others. Thanks!
 
 ## Features
 
@@ -29,6 +17,21 @@ This repo wouldn't be possible without building on the work of others. Thanks!
 * Supports Diffrax, torchdiffeq, torchode and torchsde solver backends. (SDE mode not recommended currently.)
 * Many tuneable parameters to play with.
 
+
+## Credits
+
+I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
+
+* Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
+* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4 and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
+* IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
+* Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and idea for sampling with it from https://github.com/Clybius
+* Precedence climbing (Pratt) expression parser based on implementation from https://github.com/andychu/pratt-parsing-demo
+
+This repo wouldn't be possible without building on the work of others. Thanks!
+
 ## Usage
 
 First, a note on the basic structure:
@@ -40,6 +43,11 @@ The sampler node connects to a group node. You can chain group nodes, however on
 You will then connect a substeps node to the group. These can also be chained and like groups, execution starts with the node furthest from the group. I.E.: `Substeps1 -> Substeps2 -> Substeps3 -> Group` will start with `Substeps1`.
 
 Most of these nodes have a text parameter input (YAML format - JSON is also valid YAML so you can use that instead if you prefer) and a parameter input. The parameter input can be used to specify stuff like custom noise types.
+
+You may use filters and expressions in the text parameter input. See:
+
+* [Filters](docs/filter.md)
+* [Expressions](docs/expression.md)
 
 ## Nodes
 
@@ -57,6 +65,9 @@ You can connect a chain of `OCS Group` nodes to it and it will choose one per st
 #### Text Parameters
 
 Shown in YAML with default values.
+
+<details>
+<summary>★★ Expand ★★</summary>
 
 ```yaml
 # Noise scale. May not do anything currently.
@@ -127,7 +138,7 @@ noise:
         # Possible operations: + - / * min max add sub div mul
         # Note: Each value and operation must be space delimited (i.e. "x-1" will not work).
         #       Also normal operator precedence does not apply here.
-        ref: x
+        ref: default
 
         # Batching mode, one of:
         #   batch: Matches vs batches. Immiscible mode is disabled if size < 2
@@ -152,23 +163,34 @@ noise:
         # See: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html#scipy.optimize.linear_sum_assignment
         maximize: false
 
+    filter: null
+
 
 # Model calls can be cached. This is very experimental: I don't recommend using it
 # unless you know what you're doing.
-model_call_cache:
+model:
+    cache:
+        # The cache size.
+        size: 0
 
-    # The cache size.
-    size: 0
+        # Threshold for model call caching. For example if you have size=3 and threshold=1
+        # then model calls 1 through 3 will be cached, but model call 0 will not be (the first one).
+        # Additional explanation: Some samplers call the model multiple times per step. For example,
+        # Bogacki uses three model calls: 0, 1, 2
+        threshold: 1
 
-    # Threshold for model call caching. For example if you have size=3 and threshold=1
-    # then model calls 1 through 3 will be cached, but model call 0 will not be (the first one).
-    # Additional explanation: Some samplers call the model multiple times per step. For example,
-    # Bogacki uses three model calls: 0, 1, 2
-    threshold: 1
+        # Maximum use count for cache items.
+        max_use: 1000000
 
-    # Maximum use count for cache items.
-    max_use: 1000000
+    filter:
+        input: null
+        denoised: null
+        jdenoised: null
+        cond: null
+        uncond: null
 ```
+
+</details><br/>
 
 Any parameters you don't specify will use the defaults. For example if your text parameter block is:
 
@@ -226,6 +248,9 @@ The left side group matches steps 0, 1, 2. The right side group matches all step
 
 Shown in YAML with default values.
 
+<details>
+<summary>★★ Expand ★★</summary>
+
 ```yaml
 # Noise scale. May not do anything currently.
 s_noise: 1.0
@@ -235,6 +260,9 @@ eta: 1.0
 
 # Reversible ETA (used for reversible samplers). May not do anything currently.
 reta: 1.0
+
+# Expression.
+when: null
 
 # Interpolate the schedule by the specified factor. Only used by the overshoot merge method.
 #: Example if factor 2 and steps [0,1,2] you'd get [0, 0.5, 1.0, 1.5, 2]
@@ -248,7 +276,12 @@ restart:
     immiscible:
         size: 0
 
+pre_filter: null
+
+post_filter: null
 ```
+
+</details>
 
 ### `OCS Substeps`
 
@@ -355,6 +388,9 @@ The difference with cycle is that instead of adding `noise * expected_noise_at_n
 
 Shown in YAML with default values.
 
+<details>
+<summary>★★ Expand ★★</summary>
+
 ```yaml
 # Scale for added noise.
 s_noise: 1.0
@@ -388,33 +424,9 @@ reversible_scale: 1.0
 dyn_reta_start: null
 dyn_reta_end: null
 
-# Allows normalizing the latent while sampling.
-# Example values, not enabled by default.
-normalize:
-      # One of: before, after
-    - phase: after
-      # First step to start applying the effect, 0-based.
-      start_step: 0
-      # Last step to apply the effect, 0-based, inclusive.
-      end_step: 999
-      # Dimensions used for calculating the mean for balance and target.
-      dims: [-2, -1]
-      # Target for balancing. Defaults to a target mean of 0.
-      # This can be a scalar (i.e. 0.0) or an array but it must match the
-      # dimensions of the mean.
-      balance_target: 0.0
-      # Multiplier on the balance scaling. In other words, you can gently
-      # pull the latent in the direction of the target mean rather than just
-      # setting it all at once.
-      balance_scale: 0
-      # Adjustment applied after the balance, works like balance_scale.
-      adjust_scale: 0
-      # Target for the adjustment. Can be "x" (only if phase after), a scalar or
-      # array matching the dims (see balance_target).
-      adjust_target: x
-      # Example for dims [-2, -1] on SD1.x, 2.x, SDXL or other 4 channel models.
-      #adjust_target: [[[[-0.5]],[[-0.5]], [[0.5]], [[0.5]]]]
+pre_filter: null
 
+post_filter: null
 
 ### ODE Sampler Settings ###
 
@@ -534,6 +546,8 @@ dyn_deta_end: null
 # One of lerp, lerp_alt, deta
 dyn_deta_mode: "lerp"
 ```
+
+</details>
 
 ### `OCS SimpleRestartSchedule`
 

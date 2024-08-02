@@ -1,134 +1,73 @@
-import collections
 import gc
 import random
 
 import scipy
 import torch
 
+from .filtering import Filter, make_filter
 from .utils import scale_noise, fallback
 
 
-class ImmiscibleNoise(
-    collections.namedtuple(
-        "ImmiscibleConfig",
-        (
-            "size",
-            "ref",
-            "batching",
-            "scale_ref",
-            "normalize_ref",
-            "strength",
-            "maximize",
-        ),
-        defaults=(0, "x", "channels", 1.0, False, 1.0, False),
-    )
-):
-    @classmethod
-    def __new__(cls, *args, **kwargs):
-        obj = super().__new__(*args, **kwargs)
-        ref = obj.ref.split(None)
-        ref.reverse()
-        return obj._replace(ref=ref)
+class ImmiscibleNoise(Filter):
+    name = "immiscible"
+    uses_ref = True
+    default_options = Filter.default_options | {
+        "size": 0,
+        "batching": "channels",
+        "maximize": False,
+    }
 
-    def __call__(self, noise_sampler, x_ref, refs=None):
-        if (
-            self.size == 0
-            or self.strength == 0
-            or (self.size < 2 and self.batching == "batch")
-        ):
+    def __call__(self, noise_sampler, x_ref, *, refs=None):
+        if not self.check_applies(refs):
             return noise_sampler()
-        noise = torch.cat(tuple(noise_sampler() for _ in range(self.size)))
-        ref = self.get_ref(x_ref, refs=refs)
-        result = self.unbatch(self.choose(*self.batch(noise, ref)), x_ref)
-        if self.strength == 1:
-            return result
-        return (self.strength * result) + (
-            (1.0 - self.strength) * noise[: x_ref.shape[0]]
-        )  # LERP
-
-    def get_ref(self, x_ref, refs=None):
-        ref = self.custom_ref({"x": x_ref} | fallback(refs, {}))
-        ref = scale_noise(
-            ref,
-            self.scale_ref,
-            normalized=self.normalize_ref not in (False, None),
-            normalize_dims=self.normalize_ref
-            if isinstance(self.normalize_ref, (tuple, list))
-            else (-3, -2, -1),
+        return self.apply(
+            torch.cat(tuple(noise_sampler() for _ in range(self.size)))
+            if self.size > 0
+            else noise_sampler(),
+            default_ref=x_ref,
+            refs=refs,
+            output_shape=x_ref.shape,
         )
-        return ref
 
-    def custom_ref(self, refs):
-        ops = self.ref.copy()
-        result = refs.get(ops.pop())
-        if result is None:
-            raise ValueError("Bad custom refs: must start with a value")
-        result = result.clone()
-        while ops:
-            if len(ops) < 2:
-                raise ValueError("Bad custom refs: too short")
-            op, valkey = ops.pop(), ops.pop()
-            if valkey[0] in ("+", "-") or valkey[0].isdigit():
-                val = float(valkey)
-            else:
-                val = refs.get(valkey)
-                if val is None:
-                    raise ValueError(f"Value {valkey} not found for op {op}")
-            if op in ("+", "add"):
-                result += val
-            elif op in ("-", "sub"):
-                result -= val
-            elif op in ("*", "mul"):
-                result *= val
-            elif op in ("/", "div"):
-                result /= min(val, 1e-06)
-            elif op in ("min", "max"):
-                if not isinstance(val, torch.Tensor):
-                    val = result.new_full((1,), val)
-                result = result.minimum(val) if op == "min" else result.maximum(val)
-            elif op == "norm":
-                result = scale_noise(result, val, normalized=True)
-        if result is None:
-            raise ValueError("Bad custom reference")
-        return result
+    def filter(self, latent, ref_latent, *, refs, output_shape):
+        if self.size == 0:
+            return latent
+        return self.unbatch(
+            self.immiscible(self.batch(latent), self.batch(ref_latent)), output_shape
+        )
 
-    def batch(self, noise, ref):
+    def batch(self, latent):
         if self.batching == "batch":
-            return noise, ref
-        nsz, rsz = noise.shape, ref.shape
-        if len(nsz) != 4 or len(rsz) != 4:
-            raise ValueError("Both noise and reference must be four-dimensional")
+            return latent
+        sz = latent.shape
+        if latent.ndim != 4:
+            raise ValueError("Both latent and reference must be four-dimensional")
         if self.batching == "channel":
-            noise = noise.view(nsz[0] * nsz[1], *nsz[2:])
-            ref = ref.view(rsz[0] * rsz[1], *rsz[2:])
-            return noise, ref
+            return latent.view(sz[0] * sz[1], *sz[2:])
         if self.batching == "row":
-            noise = noise.view(nsz[0] * nsz[1] * nsz[2], nsz[3])
-            ref = ref.view(rsz[0] * rsz[1] * rsz[2], rsz[3])
-            return noise, ref
+            return latent.view(sz[0] * sz[1] * sz[2], sz[3])
         if self.batching == "column":
-            noise = noise.permute(0, 1, 3, 2).reshape(nsz[0] * nsz[1] * nsz[3], nsz[2])
-            ref = ref.permute(0, 1, 3, 2).reshape(rsz[0] * rsz[1] * rsz[3], rsz[2])
-            return noise, ref
+            return latent.permute(0, 1, 3, 2).reshape(sz[0] * sz[1] * sz[3], sz[2])
         raise ValueError("Bad Immmiscible noise batching type")
 
-    def unbatch(self, noise, x_ref):
-        xsz = x_ref.shape
+    def unbatch(self, latent, sz):
         if self.batching == "column":
-            return noise.view(*xsz[:2], xsz[3], xsz[2]).permute(0, 1, 3, 2)
-        return noise.view(*xsz)
+            return latent.view(*sz[:2], sz[3], sz[2]).permute(0, 1, 3, 2)
+        return latent.view(*sz)
 
     # Based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395
     # Idea from https://github.com/Clybius
-    def choose(self, noise, latents):
+    def immiscible(self, latent, ref_latent):
         # "Immiscible Diffusion: Accelerating Diffusion Training with Noise Assignment" (2024) Li et al. arxiv.org/abs/2406.12303
         # Minimize latent-noise pairs over a batch
-        n = noise.shape[0]
-        latents_expanded = latents.half().unsqueeze(1).expand(-1, n, *latents.shape[1:])
-        noise_expanded = (
-            noise.half().unsqueeze(0).expand(latents.shape[0], *noise.shape)
+        n = latent.shape[0]
+        ref_latent_expanded = (
+            ref_latent.half().unsqueeze(1).expand(-1, n, *ref_latent.shape[1:])
         )
-        dist = (latents_expanded - noise_expanded) ** 2
+        latent_expanded = (
+            latent.half().unsqueeze(0).expand(ref_latent.shape[0], *latent.shape)
+        )
+        dist = (ref_latent_expanded - latent_expanded) ** 2
         dist = dist.mean(list(range(2, dist.dim()))).cpu()
         try:
             assign_mat = scipy.optimize.linear_sum_assignment(
@@ -136,9 +75,9 @@ class ImmiscibleNoise(
             )
         except ValueError as _exc:
             # print("\nImmiscible: Failed optimization, skipping")
-            return noise[: latents.shape[0]]
+            return latent[: ref_latent.shape[0]]
         # print("IMM IDX", assign_mat[1])
-        return noise[assign_mat[1]]
+        return latent[assign_mat[1]]
 
 
 class NoiseSamplerCache:
@@ -158,6 +97,7 @@ class NoiseSamplerCache:
         scale=1.0,
         normalize_dims=(-3, -2, -1),
         immiscible=None,
+        filter=None,
         **_unused,
     ):
         self.x = x
@@ -175,6 +115,10 @@ class NoiseSamplerCache:
         self.scale = float(scale)
         self.normalize_dims = tuple(int(v) for v in normalize_dims)
         self.immiscible = ImmiscibleNoise(**fallback(immiscible, {}))
+        if filter is None:
+            self.filter = None
+        else:
+            self.filter = make_filter(filter)
         self.update_x(x)
         if set_seed:
             random.seed(seed)
@@ -198,8 +142,8 @@ class NoiseSamplerCache:
             self.x = x
             return
         self.x = x
-        self.cache = {}
         self.mega_x = None
+        self.reset_cache()
         if self.batch_size == 1:
             self.mega_x = x
             return
@@ -231,6 +175,7 @@ class NoiseSamplerCache:
 
             def ns(_s, _sn, *_unused, **_unusedkwargs):
                 return torch.randn_like(curr_x)
+
         else:
             ns = nsobj.make_noise_sampler(
                 curr_x,
@@ -269,11 +214,17 @@ class NoiseSamplerCache:
 
         def noise_sampler(*args, x_ref=None, refs=None, **kwargs):
             if immiscible is False:
-                return noise_sampler_(*args, **kwargs)
-            return immiscible(
-                lambda args=args, kwargs=kwargs: noise_sampler_(*args, **kwargs),
-                fallback(x_ref, self.x),
-                refs=refs,
+                noise = noise_sampler_(*args, **kwargs)
+            else:
+                noise = immiscible(
+                    lambda args=args, kwargs=kwargs: noise_sampler_(*args, **kwargs),
+                    fallback(x_ref, self.x),
+                    refs=refs,
+                )
+            return (
+                self.filter.apply(noise, refs=refs)
+                if self.filter is not None
+                else noise
             )
 
         self.set_cache(cache_key, noise_sampler)

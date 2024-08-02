@@ -6,7 +6,7 @@ from .sampling import composable_sampler
 from .substep_sampling import StepSamplerChain, StepSamplerGroups, ParamGroup
 from .step_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
-from .utils import Restart
+from .restart import Restart
 
 DEFAULT_YAML_PARAMS = """\
 # JSON or YAML parameters

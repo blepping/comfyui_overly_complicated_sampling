@@ -1,3 +1,5 @@
+import contextlib
+
 import torch
 
 from comfy.k_diffusion.sampling import to_d
@@ -31,6 +33,15 @@ def fallback(val, default, exclude=None):
     return val if val is not exclude else default
 
 
+def step_generator(gen, *, get_next, initial=None):
+    next_val = initial
+    with contextlib.suppress(StopIteration):
+        while True:
+            result = gen.send(next_val)
+            next_val = get_next(result)
+            yield result
+
+
 # From Gaeros. Thanks!
 def extract_pred(x_before, x_after, sigma_before, sigma_after):
     if sigma_after == 0:
@@ -40,91 +51,30 @@ def extract_pred(x_before, x_after, sigma_before, sigma_after):
     return denoised, to_d(x_after, sigma_after, denoised)
 
 
-class Restart:
-    def __init__(self, *, s_noise=1.0, custom_noise=None, immiscible=False):
-        from .noise import ImmiscibleNoise
+def resolve_value(keys, obj):
+    if not len(keys):
+        raise ValueError("Cannot resolve empty key list")
+    result = obj
 
-        self.s_noise = s_noise
-        if immiscible is not False:
-            immiscible = ImmiscibleNoise(**immiscible)
-        self.immiscible = immiscible
-        self.custom_noise = custom_noise
+    class Empty:
+        pass
 
-    def get_noise_sampler(self, nsc):
-        return nsc.make_caching_noise_sampler(
-            self.custom_noise,
-            1,
-            nsc.max_sigma,
-            nsc.min_sigma,
-            immiscible=self.immiscible,
-        )
+    for idx, key in enumerate(keys):
+        if not (hasattr(result, "__getattr__") or hasattr(obj, "__getattribute__")):
+            raise ValueError(
+                f"Cannot access key {key}: value does not support attribute access"
+            )
+        result = getattr(result, key, Empty)
+        if result is Empty:
+            raise AttributeError(f"Key {key} from path {'.'.join(keys)} does not exist")
 
-    @staticmethod
-    def get_segment(sigmas: torch.Tensor) -> torch.Tensor:
-        last_sigma = sigmas[0]
-        for idx in range(1, len(sigmas)):
-            sigma = sigmas[idx]
-            if sigma > last_sigma:
-                return sigmas[:idx]
-            last_sigma = sigma
-        return sigmas
 
-    def split_sigmas(self, sigmas):
-        prev_seg = None
-        while len(sigmas) > 1:
-            seg = self.get_segment(sigmas)
-            sigmas = sigmas[len(seg) :]
-            if prev_seg is not None and seg[0] > prev_seg[-1]:
-                noise_scale = self.get_noise_scale(prev_seg[-1], seg[0])
-            else:
-                noise_scale = 0.0
-            prev_seg = seg
-            yield (noise_scale, seg)
-
-    def get_noise_scale(self, s_min, s_max):
-        result = (s_max**2 - s_min**2) ** 0.5
-        if isinstance(result, torch.Tensor):
-            result = result.item()
-        return result * self.s_noise
-
-    @classmethod
-    def simple_schedule(cls, sigmas, start_step, schedule=(), max_iter=1000):
-        if sigmas.ndim != 1:
-            raise ValueError("Bad number of dimensions for sigmas")
-        siglen = len(sigmas) - 1
-        if siglen <= start_step or not len(schedule):
-            return sigmas
-        siglist = sigmas.cpu().tolist()
-        out = siglist[:start_step]
-        sched_len = len(schedule)
-        sched_idx = 0
-        sig_idx = start_step
-        iter_count = 0
-        while 0 <= sched_idx < sched_len:
-            # print(f"LOOP: sched_idx={sched_idx}, sig_idx={sig_idx}: {out}")
-            iter_count += 1
-            if iter_count > max_iter:
-                raise RuntimeError("Hit max iteration count. Loop in schedule?")
-            item = schedule[sched_idx]
-            if not isinstance(item, (list, tuple)):
-                if item < 0:
-                    item = sched_len + item
-                if item < 0 or item >= sched_len:
-                    raise ValueError("Schedule jump index out of range")
-                sched_idx = item
-                continue
-            if sig_idx >= siglen or sig_idx < 0:
-                break
-            interval, jump = item
-            chunk = siglist[sig_idx : sig_idx + interval + 1]
-            # print(f"{out}  +  {chunk}")
-            out += chunk
-            sig_idx += interval + jump
-            if jump >= 0:
-                sig_idx += 1
-            sched_idx += 1
-        if sig_idx < siglen and sig_idx >= 0:
-            out += siglist[sig_idx:]
-        if out[-1] > siglist[-1]:
-            out.append(siglist[-1])
-        return torch.tensor(out).to(sigmas)
+def check_time(time_mode, time_start, time_end, sigma, step, steps):
+    step_pct = step / steps if steps != 0 else 0.0
+    if time_mode == "step":
+        return time_start <= step <= time_end
+    if time_mode == "step_pct":
+        return time_start <= step_pct <= time_end
+    if time_mode == "sigma":
+        return time_start >= sigma >= time_end
+    raise ValueError("Bad time mode")

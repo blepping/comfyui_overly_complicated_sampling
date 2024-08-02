@@ -2,6 +2,7 @@ import torch
 
 from comfy.k_diffusion.sampling import get_ancestral_step
 
+from .filtering import FilterRefs
 from .model import History
 
 
@@ -55,20 +56,11 @@ class StepSamplerChain(CommonOptionsItems):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        # step, step_pct, sigma
         self.merge_method = merge_method
+        if time_mode not in ("step", "step_pct", "sigma"):
+            raise ValueError("Bad time mode")
         self.time_mode = time_mode
         self.time_start, self.time_end = time_start, time_end
-
-    def check_time(self, sigma, step, steps):
-        step_pct = step / steps if steps != 0 else 0.0
-        if self.time_mode == "step":
-            return self.time_start <= step <= self.time_end
-        if self.time_mode == "step_pct":
-            return self.time_start <= step_pct <= self.time_end
-        if self.time_mode == "sigma":
-            return self.time_start >= sigma >= self.time_end
-        raise ValueError("Bad time mode")
 
     def clone(self):
         obj = super().clone()
@@ -84,14 +76,34 @@ class ParamGroup(Items):
 
 
 class StepSamplerGroups(CommonOptionsItems):
-    def find_match(self, sigma, step, steps):
-        for idx, item in enumerate(self.items):
-            if item.check_time(sigma, step, steps):
-                return idx
-        return None
+    pass
 
 
 class SamplerState:
+    CLONE_KEYS = (
+        "model",
+        "hist",
+        "extra_args",
+        "disable_status",
+        "eta",
+        "reta",
+        "s_noise",
+        "sigmas",
+        "callback_",
+        "noise_sampler",
+        "noise",
+        "idx",
+        "total_steps",
+        "step",
+        "substep",
+        "sigma",
+        "sigma_next",
+        "sigma_prev",
+        "sigma_down",
+        "sigma_up",
+        "refs",
+    )
+
     def __init__(
         self,
         model,
@@ -100,6 +112,7 @@ class SamplerState:
         extra_args,
         *,
         step=0,
+        substep=0,
         noise_sampler,
         callback=None,
         denoised=None,
@@ -108,9 +121,10 @@ class SamplerState:
         reta=1.0,
         s_noise=1.0,
         disable_status=False,
+        history_size=4,
     ):
         self.model = model
-        self.hist = History(4)
+        self.hist = History(max(1, history_size))
         self.extra_args = extra_args
         self.eta = eta
         self.reta = reta
@@ -120,7 +134,10 @@ class SamplerState:
         self.noise_sampler = noise_sampler
         self.noise = noise
         self.disable_status = disable_status
-        self.update(idx)
+        self.step = 0
+        self.substep = 0
+        self.total_steps = len(sigmas) - 1
+        self.update(idx)  # Sets idx, sigma_prev, sigma, sigma_down, refs
 
     @property
     def hcur(self):
@@ -142,7 +159,7 @@ class SamplerState:
     def d(self):
         return self.hcur.d
 
-    def update(self, idx=None, step=None):
+    def update(self, idx=None, step=None, substep=None):
         idx = self.idx if idx is None else idx
         self.idx = idx
         self.sigma_prev = None if idx < 1 else self.sigmas[idx - 1]
@@ -152,6 +169,9 @@ class SamplerState:
         )
         if step is not None:
             self.step = step
+        if substep is not None:
+            self.substep = substep
+        self.refs = FilterRefs.from_ss(self)
 
     def get_ancestral_step(self, eta=1.0, sigma=None, sigma_next=None):
         sigma = self.sigma if sigma is None else sigma
@@ -166,26 +186,7 @@ class SamplerState:
 
     def clone_edit(self, **kwargs):
         obj = self.__class__.__new__(self.__class__)
-        for k in (
-            "model",
-            "hist",
-            "extra_args",
-            "disable_status",
-            "eta",
-            "reta",
-            "s_noise",
-            "sigmas",
-            "callback_",
-            "noise_sampler",
-            "noise",
-            "idx",
-            "step",
-            "sigma",
-            "sigma_next",
-            "sigma_prev",
-            "sigma_down",
-            "sigma_up",
-        ):
+        for k in self.CLONE_KEYS:
             setattr(obj, k, kwargs[k] if k in kwargs else getattr(self, k))
         obj.update()
         return obj

@@ -1,7 +1,11 @@
+from collections import namedtuple
+
 import torch
 
 import comfy
 from comfy.k_diffusion.sampling import to_d
+
+from . import filtering
 
 from .utils import fallback
 
@@ -91,29 +95,73 @@ class ModelResult:
         return obj
 
 
+ModelCallCacheConfig = namedtuple(
+    "ModelCallCacheConfig", ("size", "max_use", "threshold"), defaults=(0, 1000000, 1)
+)
+
+
 class ModelCallCache:
     def __init__(
-        self, model, x, s_in, extra_args, *, size=0, max_use=1000000, threshold=1
+        self,
+        model,
+        x,
+        s_in,
+        extra_args,
+        *,
+        cache=None,
+        filter=None,
     ):
-        self.size = size
+        self.cache = ModelCallCacheConfig(**fallback(cache, {}))
+        filtargs = fallback(filter, {}).copy()
+        self.filters = {}
+        for key in ("input", "denoised", "jdenoised", "cond", "uncond"):
+            filt = filtargs.pop(key, None)
+            if filt is None:
+                continue
+            self.filters[key] = filtering.make_filter(filt)
         self.model = model
-        self.threshold = threshold
         self.s_in = s_in
-        self.max_use = max_use
         self.extra_args = extra_args
-        if self.size < 1:
+        if self.cache.size < 1:
             return
         self.reset_cache()
 
+    def maybe_filter(self, name, latent, *args, **kwargs):
+        filt = self.filters.get(name)
+        if filt is None:
+            return latent
+        return filt.apply(latent, *args, **kwargs)
+
+    def filter_result(self, result, *args, **kwargs):
+        if not self.filters:
+            return result
+        result = result.clone()
+        for key in ("denoised", "cond", "uncond", "jdenoised"):
+            filt = self.filters.get(key)
+            if filt is None:
+                continue
+            attk = f"denoised_{key}" if key in ("cond", "uncond") else key
+            inpval = getattr(result, attk, None)
+            if inpval is None:
+                continue
+            setattr(result, attk, filt.apply(inpval, *args, **kwargs))
+        return result
+
+    @staticmethod
+    def _fr_add_mr(fr, mr):
+        frmr = filtering.FilterRefs.from_mr(mr)
+        fr.kvs |= {f"{k}_curr": v for k, v in frmr.kvs.items()}
+        return fr
+
     def reset_cache(self):
-        size = self.size
+        size = self.cache.size
         self.slot = [None] * size
-        self.slot_use = [self.max_use] * size
+        self.slot_use = [self.cache.max_use] * size
 
     def get(self, idx, *, jvp=False):
-        idx -= self.threshold
+        idx -= self.cache.threshold
         if (
-            idx >= self.size
+            idx >= self.cache.size
             or idx < 0
             or self.slot[idx] is None
             or self.slot_use[idx] < 1
@@ -126,10 +174,10 @@ class ModelCallCache:
         return result
 
     def set(self, idx, mr):
-        idx -= self.threshold
-        if idx < 0 or idx >= self.size:
+        idx -= self.cache.threshold
+        if idx < 0 or idx >= self.cache.size:
             return
-        self.slot_use[idx] = self.max_use
+        self.slot_use[idx] = self.cache.max_use
         self.slot[idx] = mr
 
     def call_model(self, x, sigma, **kwargs):
@@ -144,17 +192,24 @@ class ModelCallCache:
         x,
         sigma,
         *,
-        model_call_idx=0,
+        call_index=0,
+        ss,
         s_in=None,
         tangents=None,
         return_cached=False,
         **kwargs,
     ):
-        result = self.get(model_call_idx, jvp=tangents is not None)
+        filter_refs = ss.refs | filtering.FilterRefs({
+            "model_call": call_index,
+            "orig_x": x,
+        })
+        result = self.get(call_index, jvp=tangents is not None)
         # print(
-        #     f"MODEL: idx={model_call_idx}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
+        #     f"MODEL: idx={call_index}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
         # )
         if result is not None:
+            self._fr_add_mr(filter_refs, result)
+            result = self.filter_result(result, default_ref=x, refs=filter_refs)
             return (result, True) if return_cached else result
 
         comfy.model_management.throw_exception_if_processing_interrupted()
@@ -174,6 +229,7 @@ class ModelCallCache:
             )
         }
         s_in = fallback(s_in, self.s_in)
+        x = self.maybe_filter("input", x, refs=filter_refs)
 
         def call_model(x, sigma, **kwargs):
             return self.model(x, sigma * s_in, **extra_args | kwargs)
@@ -181,18 +237,20 @@ class ModelCallCache:
         if tangents is None:
             denoised = call_model(x, sigma, **kwargs)
             mr = ModelResult(
-                model_call_idx,
+                call_index,
                 sigma,
                 x,
                 denoised,
                 denoised_uncond=denoised_uncond,
                 denoised_cond=denoised_cond,
             )
-            self.set(model_call_idx, mr)
+            self.set(call_index, mr)
+            self._fr_add_mr(filter_refs, mr)
+            mr = self.filter_result(mr, default_ref=x, refs=filter_refs)
             return (mr, False) if return_cached else mr
         denoised, denoised_prime = torch.func.jvp(call_model, (x, sigma), tangents)
         mr = ModelResult(
-            model_call_idx,
+            call_index,
             sigma,
             x,
             denoised,
@@ -200,33 +258,7 @@ class ModelCallCache:
             denoised_uncond=denoised_uncond,
             denoised_cond=denoised_cond,
         )
-        self.set(model_call_idx, mr)
+        self.set(call_index, mr)
+        self._fr_add_mr(filter_refs, mr)
+        mr = self.filter_result(mr, default_ref=x, refs=filter_refs)
         return (mr, False) if return_cached else mr
-
-    def ___call__(
-        self,
-        x,
-        sigma,
-        *,
-        model_call_idx=0,
-        tangents=None,
-        return_cached=False,
-        **kwargs,
-    ):
-        result = self.get(model_call_idx, jvp=tangents is not None)
-        # print(
-        #     f"MODEL: idx={model_call_idx}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
-        # )
-        if result is not None:
-            return (result, True) if return_cached else result
-        if tangents is None:
-            denoised = self.call_model(x, sigma, **kwargs)
-            self.set(model_call_idx, denoised)
-            return (denoised, False) if return_cached else denoised
-        denoised, denoised_prime = torch.func.jvp(self.call_model, (x, sigma), tangents)
-        self.set(model_call_idx, denoised, jdenoised=denoised_prime)
-        return (
-            (denoised, denoised_prime, False)
-            if return_cached
-            else (denoised, denoised_prime)
-        )

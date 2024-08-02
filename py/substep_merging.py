@@ -1,41 +1,86 @@
+import operator
+
 import torch
-import contextlib
 import tqdm
 
-from .utils import find_first_unsorted, fallback, Restart
-from .model import History
+from . import expression as expr
+from . import utils
+
+from .filtering import make_filter, FilterRefs
+from .restart import Restart
 from .step_samplers import STEP_SAMPLERS
+from .utils import check_time, fallback
 
 
 class MergeSubstepsSampler:
     name = "unknown"
 
-    def __init__(self, ss, sitems, **kwargs):
+    def __init__(self, ss, group):
         samplers = tuple(
-            STEP_SAMPLERS[sitem["step_method"]](**sitem) for sitem in sitems
+            STEP_SAMPLERS[sitem["step_method"]](**sitem) for sitem in group.items
         )
+        options = group.options.copy()
+        self.time_mode = group.time_mode
+        self.time_start = group.time_start
+        self.time_end = group.time_end
         self.ss = ss
         self.samplers = samplers
         self.substeps = sum(sampler.substeps for sampler in samplers)
-        self.options = kwargs
+        when_expr = options.pop("when", None)
+        self.when = expr.Expression(when_expr) if when_expr else None
+        pre_filter = options.pop("pre_filter", None)
+        post_filter = options.pop("post_filter", None)
+        self.pre_filter = None if pre_filter is None else make_filter(pre_filter)
+        self.post_filter = None if post_filter is None else make_filter(post_filter)
+        self.options = options
+
+    def check_match(self, handlers: None | object, *, ss: None | object = None):
+        ss = fallback(ss, self.ss)
+        if not check_time(
+            self.time_mode,
+            self.time_start,
+            self.time_end,
+            ss.sigma,
+            ss.step,
+            ss.total_steps,
+        ):
+            return False
+        if self.when is None:
+            return True
+        if handlers is None:
+            raise ValueError("Group has when expression but handlers not passed")
+        return operator.truth(self.when.eval(handlers))
+
+    def step_input(self, x, *, ss=None):
+        if self.pre_filter is None:
+            return x
+        ss = fallback(ss, self.ss)
+        return self.pre_filter.apply(x, refs=fallback(ss, self.ss).refs)
+
+    def step_output(self, x, *, orig_x=None, ss=None):
+        if self.post_filter is None:
+            return x
+        ss = fallback(ss, self.ss)
+        refs = ss.refs if orig_x is None else ss.refs | FilterRefs({"orig_x": orig_x})
+        return self.post_filter.apply(x, refs)
+
+    def __call__(self, x):
+        orig_x = x
+        x = self.step_input(x)
+        x = self.step(x)
+        return self.step_output(x, orig_x=orig_x)
 
     def step(self, x):
         raise NotImplementedError
 
     def substep(self, x, sampler, ss=None):
-        ss = fallback(ss, self.ss)
-        sg = sampler(x, ss)
-        next_x = None
-        with contextlib.suppress(StopIteration):
-            while True:
-                sr = sg.send(next_x)
-                next_x = sr.x
-                yield sr
+        sg = sampler(x, fallback(ss, self.ss))
+        yield from utils.step_generator(sg, get_next=lambda sr: sr.x)
 
     def simple_substep(self, x, sampler, ss=None):
         for sr in self.substep(x, sampler, ss=ss):
             if not sr.final:
-                sr.noise_x()
+                sr.noise_x(ss=fallback(ss, self.ss))
         return sr
 
     def merge_steps(self, x, result=None, *, noise=None, ss=None, denoised=True):
@@ -78,10 +123,11 @@ class SimpleSubstepsSampler(MergeSubstepsSampler):
             immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
         )
         ssampler.noise_sampler = noise_sampler
-        ss.hist.push(ss.model(x, ss.sigma))
+        ss.hist.push(ss.model(x, ss.sigma, ss=ss))
+        ss.refs = FilterRefs.from_ss(ss, have_current=True)
         ss.callback()
         sr = self.simple_substep(x, ssampler)
-        return self.merge_steps(sr.x, noise=sr.get_noise())
+        return self.merge_steps(sr.x, noise=sr.get_noise(ss=ss))
 
 
 class NormalMergeSubstepsSampler(MergeSubstepsSampler):
@@ -96,7 +142,8 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
         noise_total = 0.0
         substep = 0
         pbar = tqdm.tqdm(total=self.substeps, initial=1, disable=ss.disable_status)
-        ss.hist.push(ss.model(x, ss.sigma))
+        ss.hist.push(ss.model(x, ss.sigma, ss=ss))
+        ss.refs = FilterRefs.from_ss(ss, have_current=True)
         ss.callback()
         for ssampler in self.samplers:
             custom_noise = ssampler.options.get(
@@ -116,8 +163,9 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
                 z_avg += renoise_weight * sr.x
                 if sr.noise_scale != 0 and ss.sigma_next != 0:
                     noise_total += renoise_weight * sr.noise_scale
-                    noise += renoise_weight * sr.get_noise()
+                    noise += renoise_weight * sr.get_noise(ss=ss)
                 substep += 1
+                ss.substep = substep
                 pbar.update(1)
 
         noise = ss.noise.scale_noise(
@@ -308,8 +356,8 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
 class DivideMergeSubstepsSampler(MergeSubstepsSampler):
     name = "divide"
 
-    def __init__(self, ss, sitems, *, schedule_multiplier=4, **kwargs):
-        super().__init__(ss, sitems, **kwargs)
+    def __init__(self, ss, group, *, schedule_multiplier=4, **kwargs):
+        super().__init__(ss, group, **kwargs)
         self.schedule_multiplier = schedule_multiplier
 
     def make_schedule(self, ss):
@@ -317,7 +365,7 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
         sigmas_slice = ss.sigmas[
             ss.idx : min(max_steps + 1, ss.idx + self.schedule_multiplier)
         ]
-        unsorted_idx = find_first_unsorted(sigmas_slice)
+        unsorted_idx = utils.find_first_unsorted(sigmas_slice)
         if unsorted_idx is not None:
             sigmas_slice = sigmas_slice[:unsorted_idx]
         chunks = tuple(
@@ -352,18 +400,19 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
             )
             ssampler.noise_sampler = noise_sampler
             for subidx in range(ssampler.substeps):
-                subss.update(substep)
+                subss.update(substep, substep=substep)
                 pbar.set_description(
                     f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
                 )
-                subss.hist.push(subss.model(x, subss.sigma))
+                subss.hist.push(subss.model(x, subss.sigma, ss=subss))
+                subss.refs = FilterRefs.from_ss(subss, have_current=True)
                 if substep == 0:
                     subss.callback()
                 sr = self.simple_substep(x, ssampler, ss=subss)
                 x = sr.x
                 noise_strength = sr.noise_scale
                 if noise_strength != 0 and subss.sigma_next != 0:
-                    x = sr.noise_x()
+                    x = sr.noise_x(ss=subss)
                 substep += 1
                 pbar.update(1)
         pbar.update(0)
@@ -376,14 +425,14 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
     def __init__(
         self,
         ss,
-        sitems,
+        group,
         *,
         overshoot_expand_steps=1,
         restart_custom_noise=None,
         restart=None,
         **kwargs,
     ):
-        super().__init__(ss, sitems, **kwargs)
+        super().__init__(ss, group, **kwargs)
         self.overshoot_expand_steps = overshoot_expand_steps
         restart = fallback(restart, {})
         self.restart = Restart(
@@ -414,7 +463,7 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         ss = self.ss
         sigmas, sigidx = self.make_schedule(ss)
         subss = ss.clone_edit(idx=sigidx, sigmas=sigmas)
-        # subss.hist = subss.hist.clone()
+        subss.hist = subss.hist.clone()
         substep = 0
         pbar = tqdm.tqdm(total=self.substeps, initial=0, disable=ss.disable_status)
         max_idx = len(subss.sigmas) - 2
@@ -432,11 +481,12 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
             )
             ssampler.noise_sampler = noise_sampler
             for subidx in range(ssampler.substeps):
-                subss.update(subss.idx + substep)
+                subss.update(subss.idx + substep, substep=substep)
                 pbar.set_description(
                     f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
                 )
-                subss.hist.push(subss.model(x, subss.sigma))
+                subss.hist.push(subss.model(x, subss.sigma, ss=subss))
+                subss.refs = FilterRefs.from_ss(subss, have_current=True)
                 if substep == 0:
                     ss.hist.push(subss.hcur)
                     subss.callback()
@@ -444,7 +494,7 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
                 x = sr.x
                 noise_strength = sr.noise_scale
                 if noise_strength != 0 and subss.sigma_next != 0:
-                    x = sr.noise_x()
+                    x = sr.noise_x(ss=subss)
                 substep += 1
                 pbar.update(1)
                 last_down = subss.sigma_next.item()
@@ -455,14 +505,7 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         if last_down is not None and last_down < ss.sigma_next:
             restart_ns = self.restart.get_noise_sampler(ss.noise)
             x += ss.noise.scale_noise(
-                restart_ns(
-                    refs={
-                        "x": x,
-                        "denoised": subss.hcur.denoised,
-                        # "sigma": chunk_sigmas[0],
-                        # "sigma_next": chunk_sigmas[1],
-                    }
-                ),
+                restart_ns(refs=ss.refs),
                 self.restart.get_noise_scale(last_down, ss.sigma_next),
             )
         pbar.update(0)
