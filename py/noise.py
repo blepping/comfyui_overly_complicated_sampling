@@ -13,7 +13,7 @@ class ImmiscibleNoise(Filter):
     uses_ref = True
     default_options = Filter.default_options | {
         "size": 0,
-        "batching": "channels",
+        "batching": "channel",
         "maximize": False,
     }
 

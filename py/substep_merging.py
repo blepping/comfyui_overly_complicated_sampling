@@ -62,7 +62,7 @@ class MergeSubstepsSampler:
             return x
         ss = fallback(ss, self.ss)
         refs = ss.refs if orig_x is None else ss.refs | FilterRefs({"orig_x": orig_x})
-        return self.post_filter.apply(x, refs)
+        return self.post_filter.apply(x, refs=refs)
 
     def __call__(self, x):
         orig_x = x

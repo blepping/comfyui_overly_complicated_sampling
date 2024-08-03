@@ -57,6 +57,10 @@ class Arg:
         return cls(name, default=default, validator=ValidateArg.validate_string)
 
     @classmethod
+    def boolean(cls, name, default=Empty):
+        return cls(name, default=default, validator=ValidateArg.validate_boolean)
+
+    @classmethod
     def present(cls, name):
         return cls(name, validator=ValidateArg.validate_passthrough)
 
@@ -154,6 +158,12 @@ class ValidateArg:
     def validate_string(cls, idx, val):
         if not isinstance(val, str):
             raise ValidateError(f"Expected string argument at {idx}, got {type(val)}")
+        return val
+
+    @classmethod
+    def validate_boolean(cls, idx, val):
+        if val is not True and val is not False:
+            raise ValidateError(f"Expected boolean argument at {idx}, got {type(val)}")
         return val
 
     @classmethod

@@ -302,6 +302,11 @@ class DictHandler(BaseHandler):
         })
 
 
+class CommentHandler(BaseHandler):
+    def handle(self, obj, getter):
+        return None
+
+
 LOGIC_HANDLERS = {
     "||": OrHandler(),
     "&&": AndHandler(),
@@ -355,6 +360,7 @@ MISC_HANDLERS = {
     "s_": S_Handler(),
     "unsafe_call": UnsafeCallHandler(),
     "dict": DictHandler,
+    "comment": CommentHandler(),
 }
 
 BASIC_HANDLERS = LOGIC_HANDLERS | MATH_HANDLERS | MISC_HANDLERS

@@ -1,6 +1,7 @@
 import os
 
 import torch
+import numpy as np
 
 from . import expression as expr
 
@@ -40,7 +41,7 @@ class NormHandler(expr.BaseHandler):
 class MeanHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
-        expr.Arg.numscalar_sequence("sequence", (-3, -2, -1)),
+        expr.Arg.numscalar_sequence("dim", (-3, -2, -1)),
     )
 
     def handle(self, obj, getter):
@@ -51,12 +52,57 @@ class MeanHandler(NormHandler):
 class StdHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
-        expr.Arg.numscalar_sequence("sequence", (-3, -2, -1)),
+        expr.Arg.numscalar_sequence("dim", (-3, -2, -1)),
     )
 
     def handle(self, obj, getter):
         tensor, dim = self.safe_get_all(obj, getter)
         return tensor.std(keepdim=True, dim=dim)
+
+
+class RollHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numeric_scalar("amount", 0.5),
+        expr.Arg.numscalar_sequence("dim", (-2,)),
+    )
+
+    def handle(self, obj, getter):
+        tensor, amount, dim = self.safe_get_all(obj, getter)
+        if isinstance(amount, float) and amount < 1.0 and amount > -1.0:
+            if len(dim) > 1:
+                raise ValueError(
+                    "Cannot use percentage based amount with multiple roll dimensions",
+                )
+            amount = int(tensor.shape[dim[0]] * amount)
+        return tensor.roll(amount, dims=dim)
+
+
+class FlipHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+        expr.Arg.boolean("mirror", False),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim, mirror = self.safe_get_all(obj, getter)
+        if dim < 0:
+            dim += tensor.ndim
+        if dim < 0 or dim >= tensor.ndim:
+            raise ValueError(
+                f"Dimension out of range, wanted {dim}, tensor has {tensor.ndim} dimension(s)"
+            )
+        if not mirror:
+            return torch.flip(tensor, (dim,))
+        result = tensor.detach().clone()
+        pivot = tensor.shape[dim] // 2
+        out_slice = (
+            np.s_[:] if d != dim else np.s_[pivot:] for d in range(tensor.ndim)
+        )
+        in_slice = (np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim))
+        result[*out_slice] = torch.flip(tensor[*in_slice], dims=(dim,))
+        return result
 
 
 class BlendHandler(NormHandler):
@@ -439,6 +485,8 @@ TENSOR_OP_HANDLERS = {
     "t_mean": MeanHandler(),
     "t_std": StdHandler(),
     "t_blend": BlendHandler(),
+    "t_roll": RollHandler(),
+    "t_flip": FlipHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),
 }

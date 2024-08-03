@@ -19,6 +19,10 @@ Functions are called via `name(param1, param2)`. Keyword arguments may be passed
 
 Symbols (simple string type) are defined using `'symbol_name` - note the solitary single quote. They may not contain spaces.
 
+`;` can be used to sequence operations. I.E. `exp1 ; exp2` evaluates `exp1`, then `exp2` and then result of the expression is whatever `exp2` returned.
+
+Like Python, a parenthesized expression with a trailing comma can be used to create an empty tuple. Example: `(1,)`
+
 ## Filter Variables
 
 Indexes like `step` are zero-based: `0` will be the first step.
@@ -64,33 +68,38 @@ Available in model filters, with the exception of the `input` filter.
 
 |Name|Args|Result|Description|
 |-|-|-|-|
-|`not`|`B`|`B`|Boolean negation|
-|`mod`|`N`, `N`|`N`|Modulus operation: Example: `mod(5, 2)`|
-|`neg`|`N`|`N`|Negation. Example: `neg(2)`|
-|`between`|`N`, `N`, `N`|`B`|Boolean range checking. Example: `between(value, low, high)`|
-|`if`|`B`, `*`, `*`|`*`|Conditional expressions. Example: `if(condition, true_expression, false_expression)`|
-|`min`|`N`*|`N`|Minimum operation.|
-|`max`|`N`*|`N`|Maximum operation.|
 |`**`|`N`, `N`|`N`|Power operator.|
 |`//`|`N`, `N`|`N`|Integer division operator.|
-|`is_set`|`SY`|`B`|Tests whether a variable is set.|
+|`between`|`N`, `N`, `N`|`B`|Boolean range checking. Example: `between(value, low, high)`|
+|`comment`|`*`|`null`|Ignores any arguments passed to it (they won't be evaluated at all but must parse as a valid expression) and returns `None`|
 |`get`|`SY`, `*`|`*`|Returns a variable if set, otherwise the fallback. Example: `get('somevar, 123)`|
+|`if`|`B`, `*`, `*`|`*`|Conditional expressions. Example: `if(condition, true_expression, false_expression)`|
 |`index`|`IDX`, `S` \| `T`|`*`|Index function.|
+|`is_set`|`SY`|`B`|Tests whether a variable is set.|
+|`max`|`N`*|`N`|Maximum operation.|
+|`min`|`N`*|`N`|Minimum operation.|
+|`mod`|`N`, `N`|`N`|Modulus operation: Example: `mod(5, 2)`|
+|`neg`|`N`|`N`|Negation. Example: `neg(2)`|
+|`not`|`B`|`B`|Boolean negation|
 |`s_`|`I(null)`, `I(null)`, `I(null)`|`slice`|Creates a slice object from the `start`, `end`, `step` values. See Numpy [s_](https://numpy.org/doc/stable/reference/generated/numpy.s_.html)|
 |`unsafe_call`|`callable`, `*`\*|`*`|Allows calling an arbitrary callable. Example: `unsafe_call(some_callable, arg1, arg2, kwarg1 :> 123)`|
 
 **Legend**: `B`=boolean, `N`=numeric, `NS`=scalar numeric, `I`=integer, `F`=float, `T`=tensor, `S`=sequence, `SN`=numeric sequence, `SY`=symbol, `*`=any -- parenthized values indicate argument defaults. `*` following the type indicates variable length arguments.
 
-## Extended Expression Functions
+## Tensor Expression Functions
+
+*Tensor dimensions hint*: Most tensors you'll be dealing with are laid out as `batch`, `channels`, `height`, `width`. Negative indexes start from the end, so dimension `-1` would mean _width_ just the same as `3`.
 
 |Name|Args|Result|Description|
 |-|-|-|-|
-|`t_norm`|`T`,`N(1.0)`, `SN(-3, -2, -1)`|`T`|Tensor normalization (subtracts mean, divides by std). Example: `t_norm(some_tensor, 1.0, (-2, -1))`|
+|`bleh_enhance`|`T`, `SY`, `N(1.0)`|`T`|Available if you have the [ComfyUI-bleh](https://github.com/blepping/ComfyUI-bleh) node pack installed. See [Filtering](filter.md#bleh_enhance).|
+|`t_blend`|`T`, `T`, `N(0.5)`, `SY(lerp)`|`T`|Tensor blend operation. Example: `t_blend(t1, t2, 0.75, 'lerp)`|
+|`t_flip`|`T`, `NS`, `B(false)`|`T`|Flips a tensor on the specified dimension. If the third argument is true, it will be mirrored around the center in that dimension. Example: `t_flip(some_tensor, -1, true)`
 |`t_mean`|`T`, `SN(-3, -2, -1)`|`T`|Tensor mean, second argument is dimensions. Example: `t_mean(some_tensor, (-2, -1))`|
+|`t_norm`|`T`,`N(1.0)`, `SN(-3, -2, -1)`|`T`|Tensor normalization (subtracts mean, divides by std). Example: `t_norm(some_tensor, 1.0, (-2, -1))`|
+|`t_roll`|`T`, `NS(0.5)`, `SN((-2,))`|`T`|Rolls a tensor along the specified dimensions. If amount is >= -1.0 and < 1.0 this will be interpreted as a percentage. Example: `t_roll(some_tensor, 10, (-2,))`|
 |`t_std`|`T`, `SN(-3, -2, -1)`|`T`|Tensor std, second argument is dimensions. Example: `t_std(some_tensor, (-2, -1))`|
-|`t_blend`|`T`, `T`, `N(0.5)`, `SY(lerp)`|Tensor blend operation. Example: `t_blend(t1, t2, 0.75, 'lerp)`|
 |`unsafe_tensor_method`|`T`, `SY`, `*`\*|`*`|Unsafe tensor method call. See note below. Example: `unsafe_tensor_method(some_tensor, 'mul, 10)`|
 |`unsafe_torch`|`SY`|`*`|Unsafe Torch module attribute access. See note below. Example: `unsafe_torch('nn.functional.interpolate)`|
-|`bleh_enhance`|`T`, `SY`, `N(1.0)`|`T`|Available if you have the [ComfyUI-bleh](https://github.com/blepping/ComfyUI-bleh) node pack installed. See [Filtering](filter.md#bleh_enhance).|
 
 **Note on `unsafe_tensor_method` and `unsafe_torch`**: These functions are disabled by default. If the environment variable `COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS` is set to anything then you can use `unsafe_tensor_method` with a whitelisted set of methods (best effort to avoid anything actually unsafe). If the environment variable `COMFYUI_OCS_ALLOW_ALL_UNSAFE` is set to anything then `unsafe_torch` is enabled and `unsafe_tensor_method` will allow calling any method. ***WARNING***: Allowing _all_ unsafe with workflows you don't trust is _not_ recommended and a malicious workflow will likely have access to anything ComfyUI can access. It is effectively the same as letting the workflow run an arbitrary script on your system.
