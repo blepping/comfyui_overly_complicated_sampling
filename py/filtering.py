@@ -482,12 +482,6 @@ if EXT_SONAR:
 
     class SonarPowerFilter(Filter):
         name = "sonar_power_filter"
-        default_power_filter = {
-            "mix": 1.0,
-            "normalization_factor": 1.0,
-            "common_mode": 0.0,
-            "channel_correlation": "1,1,1,1,1,1",
-        }
         default_options = Filter.default_options
 
         def __init__(self, **kwargs):
@@ -498,23 +492,10 @@ if EXT_SONAR:
                 return
             if not isinstance(power_filter, dict):
                 raise ValueError("power_filter key must be dict or null")
-            self.power_filter = self.make_power_filter(power_filter, toplevel=True)
-
-        @classmethod
-        def make_power_filter(cls, fdict, toplevel=False):
-            fdict = fdict.copy()
-            compose_with = fdict.pop("compose_with", None)
-            if compose_with:
-                fdict["compose_with"] = cls.make_power_filter(compose_with)
-            if toplevel:
-                topargs = {
-                    k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()
-                }
-            power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
-            if not toplevel:
-                return power_filter
-            return EXT_SONAR.powernoise.PowerNoiseItem(
-                1, power_filter=power_filter, time_brownian=True, **topargs
+            self.power_filter = (
+                expression_handlers.SonarPowerFilterHandler.make_power_filter(
+                    power_filter
+                )
             )
 
         def filter(self, latent, ref_latent, *args, refs=None, **kwargs):

@@ -560,19 +560,30 @@ if EXT_SONAR:
         }
 
         @classmethod
-        def make_power_filter(cls, fdict, toplevel=False):
+        def make_power_filter(cls, fdict, *, toplevel=True):
             fdict = fdict.copy()
             compose_with = fdict.pop("compose_with", None)
             if compose_with:
                 if not isinstance(compose_with, dict):
                     raise TypeError("compose_with must be a dictionary")
-                fdict["compose_with"] = cls.make_power_filter(compose_with)
-            power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
-            if not toplevel:
-                return power_filter
+                fdict["compose_with"] = cls.make_power_filter(
+                    compose_with, toplevel=False
+                )
             topargs = {
                 k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()
             }
+            power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
+            if not toplevel:
+                return power_filter
+            cc = topargs.get("channel_correlation")
+            if cc is not None:
+                if not isinstance(cc, (list, tuple)) or not all(
+                    isinstance(v, (int, float)) for v in cc
+                ):
+                    raise TypeError(
+                        "Bad channel correlation type: must be comma separated string or numeric sequence"
+                    )
+                topargs["channel_correlation"] = ",".join(repr(v) for v in cc)
             return EXT_SONAR.powernoise.PowerNoiseItem(
                 1, power_filter=power_filter, time_brownian=True, **topargs
             )
@@ -581,7 +592,7 @@ if EXT_SONAR:
             tensor, filter_def = self.safe_get_all(obj, getter)
             if not isinstance(filter_def, dict):
                 raise TypeError("filter argument must be a dictionary")
-            power_filter = self.make_power_filter(filter_def, toplevel=True)
+            power_filter = self.make_power_filter(filter_def)
             filter_rfft = power_filter.make_filter(tensor.shape).to(
                 tensor.device, non_blocking=True
             )
