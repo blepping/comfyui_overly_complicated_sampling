@@ -1,3 +1,5 @@
+import functools
+
 from .util import torch
 
 
@@ -49,8 +51,14 @@ class Arg:
         )
 
     @classmethod
-    def sequence(cls, name, default=Empty):
-        return cls(name, default=default, validator=ValidateArg.validate_sequence)
+    def sequence(cls, name, default=Empty, *, item_validator=None):
+        return cls(
+            name,
+            default=default,
+            validator=functools.partial(
+                ValidateArg.validate_sequence, item_validator=item_validator
+            ),
+        )
 
     @classmethod
     def string(cls, name, default=Empty):
@@ -134,25 +142,36 @@ class ValidateArg:
         return val
 
     @staticmethod
-    def validate_sequence(idx, val):
+    def validate_sequence(idx, val, *, item_validator=None):
         if not isinstance(val, (list, tuple)):
             raise ValidateError(f"Expected sequence argument at {idx}, got {type(val)}")
-        return val
+        if item_validator is None:
+            return val
+        try:
+            return tuple(item_validator(iidx, v) for iidx, v in enumerate(val))
+        except ValidateError as exc:
+            raise ValidateError(f"Item validation failed for in sequence: {exc}")
 
     @classmethod
     def validate_numscalar_sequence(cls, idx, val):
-        if not isinstance(val, (list, tuple)):
-            raise ValidateError(f"Expected sequence argument at {idx}, got {type(val)}")
-        try:
-            _ = all(
-                cls.validate_numeric_scalar(f"{idx}[{i}]", v) is not None
-                for i, v in enumerate(val)
-            )
-        except ValidateError as exc:
-            raise ValidateError(
-                f"Expected numeric sequence argument at {idx}, got {type(val)}: {exc}"
-            )
-        return val
+        return cls.validate_sequence(
+            idx, val, item_validator=cls.validate_numeric_scalar
+        )
+
+    # @classmethod
+    # def validate_numscalar_sequence(cls, idx, val):
+    #     if not isinstance(val, (list, tuple)):
+    #         raise ValidateError(f"Expected sequence argument at {idx}, got {type(val)}")
+    #     try:
+    #         _ = all(
+    #             cls.validate_numeric_scalar(f"{idx}[{i}]", v) is not None
+    #             for i, v in enumerate(val)
+    #         )
+    #     except ValidateError as exc:
+    #         raise ValidateError(
+    #             f"Expected numeric sequence argument at {idx}, got {type(val)}: {exc}"
+    #         )
+    #     return val
 
     @classmethod
     def validate_string(cls, idx, val):

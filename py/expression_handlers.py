@@ -4,6 +4,7 @@ import torch
 import numpy as np
 
 from . import expression as expr
+from . import latent
 
 from .external import MODULES as EXT
 from .utils import scale_noise, resolve_value
@@ -110,7 +111,7 @@ class BlendHandler(NormHandler):
         expr.Arg.tensor("tensor1"),
         expr.Arg.tensor("tensor2"),
         expr.Arg.numeric("scale", 0.5),
-        expr.Arg.string("lerp"),
+        expr.Arg.string("mode", "lerp"),
     )
 
     def handle(self, obj, getter):
@@ -119,6 +120,68 @@ class BlendHandler(NormHandler):
         if not blend_handler:
             raise KeyError(f"Unknown blend mode {mode!r}")
         return blend_handler(t1, t2, scale)
+
+
+class ContrastAdaptiveSharpeningHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numeric("scale", 0.5),
+    )
+
+    def handle(self, obj, getter):
+        t, scale = self.safe_get_all(obj, getter)
+        return latent.contrast_adaptive_sharpening(t, scale)
+
+
+class ScaleHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.one_of(
+            "scale",
+            (
+                expr.ValidateArg.validate_numeric_scalar,
+                expr.ValidateArg.validate_numscalar_sequence,
+            ),
+        ),
+        expr.Arg.string("mode", "bicubic"),
+        expr.Arg.boolean("absolute_scale", False),
+    )
+
+    def handle(self, obj, getter):
+        t, scale, mode, abs_scale = self.safe_get_all(obj, getter)
+        if isinstance(scale, (list, tuple)):
+            if len(scale) != 2:
+                raise ValueError(
+                    "When passing scale as a tuple, it must be in the form (h, w)"
+                )
+        else:
+            scale = (scale, scale)
+        if abs_scale:
+            scale = tuple(int(v) for v in scale)
+        else:
+            scale = (int(t.shape[-1] * scale[0]), int(t.shape[-2] * scale[1]))
+        if not all(v > 0 for v in scale):
+            raise ValueError(f"Invalid scale: scale values must be > 0, got: {scale!r}")
+        return latent.scale_samples(t, scale[1], scale[0], mode=mode)
+
+
+class NoiseHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.string("type", "gaussian"),
+    )
+
+    def handle(self, obj, getter):
+        t, typ = self.safe_get_all(obj, getter)
+        ctx = getter.handlers
+        smin, smax, s, sn = (
+            h(ctx, *getter.args, **getter.kwargs) if h is not None else None
+            for h in (
+                ctx.get(k) for k in ("sigma_min", "sigma_max", "sigma", "sigma_next")
+            )
+        )
+        ns = latent.get_noise_sampler(typ, t, smin, smax, normalized=False)
+        return ns(s, sn)
 
 
 class UnsafeTorchTensorMethodHandler(NormHandler):
@@ -478,7 +541,59 @@ if EXT_BLEH:
                 tensor, mode, scale=scale, adjust_scale=False
             )
 
-    HANDLERS["bleh_enhance"] = BlehEnhanceHandler()
+    HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
+
+if EXT_SONAR:
+
+    class SonarPowerFilterHandler(expr.BaseHandler):
+        input_validators = (
+            expr.Arg.tensor("tensor"),
+            expr.Arg.present("filter"),
+        )
+        output_validator = expr.Arg.tensor("output")
+
+        default_power_filter = {
+            "mix": 1.0,
+            "normalization_factor": 1.0,
+            "common_mode": 0.0,
+            "channel_correlation": "1,1,1,1,1,1",
+        }
+
+        @classmethod
+        def make_power_filter(cls, fdict, toplevel=False):
+            fdict = fdict.copy()
+            compose_with = fdict.pop("compose_with", None)
+            if compose_with:
+                if not isinstance(compose_with, dict):
+                    raise TypeError("compose_with must be a dictionary")
+                fdict["compose_with"] = cls.make_power_filter(compose_with)
+            power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
+            if not toplevel:
+                return power_filter
+            topargs = {
+                k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()
+            }
+            return EXT_SONAR.powernoise.PowerNoiseItem(
+                1, power_filter=power_filter, time_brownian=True, **topargs
+            )
+
+        def handle(self, obj, getter):
+            tensor, filter_def = self.safe_get_all(obj, getter)
+            if not isinstance(filter_def, dict):
+                raise TypeError("filter argument must be a dictionary")
+            power_filter = self.make_power_filter(filter_def, toplevel=True)
+            filter_rfft = power_filter.make_filter(tensor.shape).to(
+                tensor.device, non_blocking=True
+            )
+            ns = power_filter.make_noise_sampler_internal(
+                tensor,
+                lambda *_unused, latent=tensor: latent,
+                filter_rfft,
+                normalized=False,
+            )
+            return ns(None, None)
+
+    HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
 
 TENSOR_OP_HANDLERS = {
     "t_norm": NormHandler(),
@@ -487,6 +602,9 @@ TENSOR_OP_HANDLERS = {
     "t_blend": BlendHandler(),
     "t_roll": RollHandler(),
     "t_flip": FlipHandler(),
+    "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
+    "t_scale": ScaleHandler(),
+    "t_noise": NoiseHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),
 }

@@ -20,6 +20,11 @@ else:
         "lerp": lambda a, b, t: (1 - t) * a + t * b,
     }
 
+BLENDING_MODES = BLENDING_MODES | {
+    "a_only": lambda a, b, t: a * t,
+    "b_only": lambda a, b, t: b * t,
+}
+
 FILTER = {}
 
 
@@ -497,6 +502,7 @@ if EXT_SONAR:
 
         @classmethod
         def make_power_filter(cls, fdict, toplevel=False):
+            fdict = fdict.copy()
             compose_with = fdict.pop("compose_with", None)
             if compose_with:
                 fdict["compose_with"] = cls.make_power_filter(compose_with)

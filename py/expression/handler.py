@@ -27,7 +27,7 @@ class BaseHandler:
     def safe_get(self, key, obj, getter=None, *, default=Empty):
         str_key = isinstance(key, str)
         if str_key:
-            argidx, validator = self.input_validators_by_key[key]
+            argidx, validator = self.input_validators_by_key.get(key, (-1, None))
         else:
             argidx, validator = (
                 key,
@@ -42,7 +42,7 @@ class BaseHandler:
             if default is not Empty or validator is None
             else getattr(validator, "default", Empty)
         )
-        if argidx < len(obj.args):
+        if argidx >= 0 and argidx < len(obj.args):
             eff_key = argidx
             str_eff_key = False
         elif str_key:
@@ -297,9 +297,7 @@ class DictHandler(BaseHandler):
     def handle(self, obj, getter):
         if len(obj.args):
             raise ValueError("Non-KV items passed to dict constructor")
-        return ExpDict({
-            k: self.safe_get(k, obj, getter=getter) for k in obj.kwargs.keys()
-        })
+        return ExpDict({k: self.safe_get(k, obj, getter) for k in obj.kwargs.keys()})
 
 
 class CommentHandler(BaseHandler):
@@ -359,7 +357,7 @@ MISC_HANDLERS = {
     "index": IndexHandler(),
     "s_": S_Handler(),
     "unsafe_call": UnsafeCallHandler(),
-    "dict": DictHandler,
+    "dict": DictHandler(),
     "comment": CommentHandler(),
 }
 
