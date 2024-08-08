@@ -21,6 +21,10 @@ Symbols (simple string type) are defined using `'symbol_name` - note the solitar
 
 `;` can be used to sequence operations. I.E. `exp1 ; exp2` evaluates `exp1`, then `exp2` and then result of the expression is whatever `exp2` returned.
 
+`:=` is used to assign to a temporary variable (see `set_var` below).
+
+The expression language supports a C/JavaScript style ternary operator: `condition ? true_branch : false_branch` is the equivalent of `if(condition, true_branch, false_branch)`.
+
 Like Python, a parenthesized expression with a trailing comma can be used to create an empty tuple. Example: `(1,)`
 
 ## Filter Variables
@@ -98,6 +102,8 @@ Available in model filters, with the exception of the `input` filter.
  | <td colspan=3 align=left>Boolean negation</td> |
  |⬤| `s_` | start:`I(null)`, end:`I(null)`, step:`I(null)` | `slice` |
  | <td colspan=3 align=left>Creates a slice object from the `start`, `end`, `step` values. See Numpy [s_](https://numpy.org/doc/stable/reference/generatednumpy.s_.html)</td> |
+ |⬤| `set_var` | `SY`, `*` | `*` |
+ | <td colspan=3 align=left>Sets a temporary variable to the specified value and returns the value. Alias for the `:=` assignment operator. <br/> **Example**: `test1 := 2; set_var('test2, 10); test1 * test2`</td> |
  |⬤| `unsafe_call` | `callable`, `*`\* | `*` |
  | <td colspan=3 align=left>Allows calling an arbitrary callable. <br/> **Example:** `unsafe_call(some_callable, arg1, arg2, kwarg1 :> 123)`</td>
 

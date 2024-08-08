@@ -382,10 +382,12 @@ class EulerStep(SingleStepSampler):
 class CycleSingleStepSampler(SingleStepSampler):
     def __init__(self, *, cycle_pct=0.25, **kwargs):
         super().__init__(**kwargs)
+        if cycle_pct < 0:
+            raise ValueError("cycle_pct must be positive")
         self.cycle_pct = cycle_pct
 
     def get_cycle_scales(self, sigma_next):
-        keep_scale = sigma_next * (1.0 - self.cycle_pct)
+        keep_scale = sigma_next * (1.0 - self.cycle_pct) if self.cycle_pct < 1 else 0.0
         add_scale = ((sigma_next**2.0 - keep_scale**2.0) ** 0.5) * (
             0.95 + 0.25 * self.cycle_pct
         )
@@ -401,9 +403,9 @@ class EulerCycleStep(CycleSingleStepSampler):
     def step(self, x, ss):
         if ss.sigma_next == 0:
             return (yield from self.denoised_result(ss))
-        d = self.to_d(ss.hcur)
         keep_scale, add_scale = self.get_cycle_scales(ss.sigma_next)
-        yield from self.result(ss, ss.denoised + d * keep_scale, add_scale)
+        keep_noise = self.to_d(ss.hcur) * keep_scale if keep_scale > 0 else 0.0
+        yield from self.result(ss, ss.denoised + keep_noise, add_scale)
 
 
 class DPMPP2MStep(HistorySingleStepSampler, DPMPPStepMixin):

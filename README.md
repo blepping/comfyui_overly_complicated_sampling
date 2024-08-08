@@ -4,6 +4,7 @@ Experimental and mathematically unsound (but fun!) sampling for [ComfyUI](https:
 
 **Status**: In flux, may be useful but likely to change/break workflows frequently. Mainly for advanced users.
 
+Feel free create a question in Discussions for usage help: [OCS Q&A Discussion](https://github.com/blepping/comfyui_overly_complicated_sampling/discussions/categories/q-a)
 
 ## Features
 
@@ -48,6 +49,14 @@ You may use filters and expressions in the text parameter input. See:
 
 * [Filters](docs/filter.md)
 * [Expressions](docs/expression.md)
+
+## Integration
+
+If you have [ComfyUI-bleh](https://github.com/blepping/ComfyUI-bleh) available, you will have access to many more blend and scaling modes as well as some extra features.
+
+If you have [ComfyUI-sonar](https://github.com/blepping/ComfyUI-sonar) available, you will have access to many more noise types as well as the Power Filter feature.
+
+If you're going to use OCS, I strongly recommend also installing those two node packs.
 
 ## Nodes
 

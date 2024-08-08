@@ -14,7 +14,8 @@ def find_merge_sampler(merge_samplers, ss) -> object | None:
     handlers = None
     for merge_sampler in merge_samplers:
         if merge_sampler.when is not None and handlers is None:
-            handlers = FILTER_HANDLERS.clone_with_refs(ss.refs)
+            handlers = FILTER_HANDLERS.clone(constants=ss.refs)
+            # handlers = FILTER_HANDLERS.clone_with_refs(ss.refs)
         if merge_sampler.check_match(handlers, ss=ss):
             return merge_sampler
     return None

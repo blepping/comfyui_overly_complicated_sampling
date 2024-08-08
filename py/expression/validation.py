@@ -1,13 +1,11 @@
 import functools
 
 from .util import torch
+from .types import Empty
 
 
 class Arg:
     __slots__ = ("name", "default", "validator")
-
-    class Empty:
-        pass
 
     def __init__(self, name, default=Empty, *, validator=None):
         self.name = name
@@ -18,9 +16,8 @@ class Arg:
         return self.validate(value, *args, **kwargs)
 
     def validate(self, value):
-        # FIXME: This shouldn't be using None.
-        if value is None:
-            if self.default is self.Empty:
+        if value is Empty:
+            if self.default is Empty:
                 raise ValueError(f"Missing value for argument {self.name}")
             return self.default
         try:

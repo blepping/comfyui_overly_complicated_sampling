@@ -21,10 +21,10 @@ class ExpOp(str, ExpBase):
     __slots__ = ()
 
     def eval(self, handlers, *args, **kwargs):
-        h = handlers.get(self)
-        if h is None:
+        value = handlers.get_var(self)
+        if value is Empty:
             raise KeyError(f"No handler for op/var {self}")
-        return h(handlers, *args, **kwargs)
+        return value
 
 
 class ExpBinOp(ExpOp):
@@ -135,27 +135,20 @@ class ExpStatements(ExpBase):
 
 
 class ExprGetter:
-    GetterEmpty = Empty
-    # class GetterEmpty:
-    #     def __bool__(self):
-    #         return False
-
-    def __init__(self, obj, handlers, *args, **kwargs):
+    def __init__(self, obj, ctx, *args, **kwargs):
         self.obj = obj
-        self.handlers = handlers
+        self.ctx = ctx
         self.args = args
         self.kwargs = kwargs
 
-    def __call__(self, k, *, default=GetterEmpty):
+    def __call__(self, k, *, default=Empty):
         obj = self.obj
         result = (
-            obj.kwargs.get_eval(
-                k, self.handlers, *self.args, default=default, **self.kwargs
-            )
+            obj.kwargs.get_eval(k, self.ctx, *self.args, default=default, **self.kwargs)
             if isinstance(k, str)
-            else obj.args.get_eval(k, self.handlers, *self.args, **self.kwargs)
+            else obj.args.get_eval(k, self.ctx, *self.args, **self.kwargs)
         )
-        if result is self.GetterEmpty:
+        if result is Empty:
             raise KeyError(f"Unknown key {k!r}")
         return result
 
@@ -169,8 +162,8 @@ class ExpFunAp(ExpBase):
         self.kwargs = kwargs if kwargs is not None else ExpDict()
 
     def eval(self, handlers, *args, **kwargs):
-        handler = handlers.get(self.name)
-        if handler is None:
+        handler = handlers.get_handler(self.name)
+        if handler is Empty:
             raise KeyError(f"No handler for op: {self.name!r}")
         return handler(
             self, getter=ExprGetter(self, handlers, *args, **kwargs), **kwargs

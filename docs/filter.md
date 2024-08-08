@@ -92,6 +92,8 @@ final: default
 
 There may be additional keys depending on the filter type.
 
+If you have [ComfyUI-bleh](https://github.com/blepping/ComfyUI-bleh) available, you can use any blend mode it supports. Otherwise OCS provides these built-in blend modes: `lerp`, `a_only`, `b_only`. _Note_: `a` is considered the original value, `b` the changed value. `a_only` and `b_only` will still scale their output by the `strength`.
+
 ## Filter Types
 
 ### `simple`

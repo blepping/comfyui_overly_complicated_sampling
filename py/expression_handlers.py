@@ -173,7 +173,7 @@ class NoiseHandler(NormHandler):
 
     def handle(self, obj, getter):
         t, typ = self.safe_get_all(obj, getter)
-        ctx = getter.handlers
+        ctx = getter.ctx
         smin, smax, s, sn = (
             h(ctx, *getter.args, **getter.kwargs) if h is not None else None
             for h in (

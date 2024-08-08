@@ -15,13 +15,15 @@ from .types import (
     ExpKV,
 )
 
+COMMA_PRECEDENCE = 2
+
 
 class Expression:
     EXPR_RE = re.compile(
         r"""
     \s*
     (
-          \d+             # Possibly negative numeric literal
+          \d+                # Numeric literal
             (?: \. \d* )?    # Floating point
             (?: e [+-] \d+)? # Scientific notation
         | (?: \*\* | // )    # Doubled operators
@@ -30,9 +32,11 @@ class Expression:
         | (?: \|\| | && )    # Logic
         | [-+*/|!(),]        # Operators
         | :>                 # Key value binop
-        | ;
-        | \[ | ]
-        | \.\.\.
+        | :=                 # Assignment
+        | ;                  # Sequencing
+        | [?:]               # Ternary
+        | \[ | ]             # Index
+        | \.\.\.             # Index ellipsis
         | '[\w.]+            # Symbol
         | `?[a-z][\w.]*`?    # Function/variable names
     )
@@ -53,7 +57,8 @@ class Expression:
         return self.eval(*args, **kwargs)
 
     def eval(self, handlers, *args, **kwargs):
-        print("\nEVAL", self.expr)
+        if self.expr != ExpOp("default"):
+            print("\nEVAL", self.expr)
         if not isinstance(self.expr, ExpBase):
             return self.expr
         return self.expr.eval(handlers, *args, **kwargs)
@@ -93,7 +98,7 @@ class Expression:
         yield from (cls.fixup_token(m.group(1)) for m in cls.EXPR_RE.finditer(s))
 
 
-STATIC_OP_HANDLERS = {
+CONST_OP_HANDLERS = {
     "+": operator.add,
     "-": operator.sub,
     "*": operator.mul,
@@ -108,18 +113,29 @@ STATIC_OP_HANDLERS = {
     "idiv": operator.floordiv,
     "pow": operator.pow,
     "mod": operator.mod,
+    "neg": operator.neg,
+    ">": operator.gt,
+    "<": operator.lt,
+    ">=": operator.ge,
+    "<=": operator.le,
+    "!=": operator.ne,
+    "==": operator.eq,
 }
+
+
+def is_const_value(val):
+    return val in (None, True, False) or isinstance(val, (int, float, ExpSym))
 
 
 def make_funap(op, args=(), kwargs=None):
     if kwargs is None:
         kwargs = ExpDict()
     argc = len(args)
-    if argc > 2 or len(kwargs) or not all(isinstance(v, (int, float)) for v in args):
+    if argc > 2 or len(kwargs) or not all(is_const_value(v) for v in args):
         return ExpFunAp(op, args, kwargs)
     if argc == 1 and op in "-+":
         return -args[0] if op == "-" else args[0]
-    h = STATIC_OP_HANDLERS.get(op)
+    h = CONST_OP_HANDLERS.get(op)
     if h is None:
         return ExpFunAp(op, args, kwargs)
     return h(*args)
@@ -171,7 +187,7 @@ class ExprParserSpec(ParserSpec):
             raise ParseError(f"{left!r} is not a valid function/variable name")
         args = []
         while p.lexer and p.token != ")":
-            args.append(p.parse_until(1))
+            args.append(p.parse_until(COMMA_PRECEDENCE))
             if p.token == ",":
                 p.advance()
         p.expect(")")
@@ -186,15 +202,9 @@ class ExprParserSpec(ParserSpec):
 
     @staticmethod
     def left_semicolon(p, token, left, bp):
-        if p.token == ")" or p.token is None:
-            return (
-                left
-                if isinstance(left, ExpStatements)
-                else ExpStatements(ExpTuple((left,)))
-            )
-        r = p.parse_until(bp)
+        r = None if p.token in (None, ")", ";") else p.parse_until(0)
         return ExpStatements(
-            ExpTuple(*left.statements, r)
+            ExpTuple((*left.statements, r))
             if isinstance(left, ExpStatements)
             else ExpTuple((left, r))
         )
@@ -204,6 +214,20 @@ class ExprParserSpec(ParserSpec):
         idx = p.parse_until(0)
         p.expect("]")
         return make_funap("index", ExpTuple((idx, left)))
+
+    @staticmethod
+    def left_assign(p, token, left, bp):
+        if not isinstance(left, (ExpOp, ExpSym)):
+            raise ParseError(f"bad LHS type for assignment operation {type(left)}")
+        val = p.parse_until(bp)
+        return make_funap("set_var", ExpTuple((ExpSym(left), val)))
+
+    @staticmethod
+    def left_ternary(p, token, left, bp):
+        true_branch = p.parse_until(0)
+        p.expect(":")
+        false_branch = p.parse_until(bp)
+        return make_funap("if", ExpTuple((left, true_branch, false_branch)))
 
     @staticmethod
     def get_type(token):
@@ -230,10 +254,12 @@ class ExprParserSpec(ParserSpec):
         self.add_left(9, self.left_binop, ("&&",))
         self.add_left(7, self.left_binop, ("||",))
         self.add_left(6, self.left_kv, (":>",))
-        self.add_left(5, self.left_semicolon, (";",))
-        self.add_left(1, self.left_comma, (",",))
+        self.add_leftright(5, self.left_ternary, ("?",))
+        self.add_leftright(4, self.left_assign, (":=",))
+        self.add_left(COMMA_PRECEDENCE, self.left_comma, (",",))
+        self.add_left(1, self.left_semicolon, (";",))
         self.add_null(0, self.null_paren, ("(",))
         self.add_null(
             -1, self.null_constant, ("number", "op", "sym", Ellipsis, True, False, None)
         )
-        self.add_null(-1, ParserSpec.null_error, (")", "]"))
+        self.add_null(-1, ParserSpec.null_error, (")", "]", ":"))

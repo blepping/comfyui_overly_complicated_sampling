@@ -28,35 +28,8 @@ BLENDING_MODES = BLENDING_MODES | {
 FILTER = {}
 
 
-class FilterHandlerCollection:
-    def __init__(self, op_handlers, refs):
-        self.op_handlers = op_handlers
-        self.refs = refs
-
-    def get(self, k, default=None):
-        result = self.op_handlers.get(k)
-        if result is not None:
-            return result
-        result = self.refs.get(k)
-        if result is None:
-            return None
-
-        def h(obj, *_args, __k=k, __val=result, **_kwargs):
-            if not isinstance(obj, FilterHandlerCollection):
-                raise ValueError(f"Unexpected arguments to variable reference {k}")
-            return result
-
-        return h
-
-    def __contains__(self, k):
-        return k in self.op_handlers or k in self.refs
-
-    def clone_with_refs(self, refs):
-        return self.__class__(self.op_handlers, refs)
-
-
-FILTER_HANDLERS = FilterHandlerCollection(
-    expr.BASIC_HANDLERS | expression_handlers.HANDLERS, {}
+FILTER_HANDLERS = expr.HandlerContext(
+    expr.BASIC_HANDLERS | expression_handlers.HANDLERS
 )
 
 
@@ -240,7 +213,7 @@ class Filter:
         if self.when is None:
             return True
         refs = fallback(refs, FilterRefs())
-        matched = self.when.eval(FILTER_HANDLERS.clone_with_refs(refs))
+        matched = self.when.eval(FILTER_HANDLERS.clone(constants=refs, variables={}))
         # if matched:
         #     print("\nMATCH", self.name)
         return matched
@@ -250,7 +223,7 @@ class Filter:
             return ops.apply(default_ref, ops, refs=refs)
         drefs = FilterRefs({"default": default_ref})
         refs = drefs if refs is None else refs | drefs
-        return ops.eval(FILTER_HANDLERS.clone_with_refs(refs))
+        return ops.eval(FILTER_HANDLERS.clone(constants=refs, variables={}))
 
 
 class SimpleFilter(Filter):

@@ -1,12 +1,53 @@
 import operator
 
 from .validation import ValidateArg, Arg, ValidateError
-from .types import Empty, ExpDict
+from .types import Empty, ExpDict, ExpOp
 from .util import torch
 
 
 class HandlerError(Exception):
     pass
+
+
+class HandlerContext:
+    def __init__(self, handlers=None, constants=None, variables=None):
+        self.handlers = handlers if handlers is not None else {}
+        self.constants = constants if constants is not None else {}
+        self.variables = variables if variables is not None else {}
+
+    def get_handler(self, k, default=Empty):
+        return self.handlers.get(k, default)
+
+    def get_var(self, k, default=Empty):
+        result = self.constants.get(k, Empty)
+        if result is Empty:
+            result = self.variables.get(k, Empty)
+        return default if result is Empty else result
+
+    def set_var(self, k, v):
+        if k in self.constants:
+            raise KeyError(
+                f"Cannot set variable with key {k}: already exists as a constant"
+            )
+        self.variables[k] = v
+
+    def unset_var(self, k):
+        if k in self.variables:
+            del self.variables[k]
+            return True
+        return False
+
+    def __contains__(self, k):
+        return any(
+            k in coll for coll in (self.handlers, self.constants, self.variables)
+        )
+
+    def clone(self, *, handlers=Empty, constants=Empty, variables=Empty):
+        return self.__class__(
+            self.handlers if handlers is Empty else handlers,
+            self.constants if constants is Empty else constants,
+            self.variables if variables is Empty else variables,
+        )
 
 
 class BaseHandler:
@@ -50,7 +91,7 @@ class BaseHandler:
             str_eff_key = True
         else:
             raise ValidateError(
-                f"Error validating input argument {key}, out of range for actual function arguments"
+                f"Error validating input argument {key} for {obj.name}, out of range for actual function arguments"
             )
         if getter is None:
             if str_eff_key:
@@ -65,7 +106,7 @@ class BaseHandler:
             return validator(key, val)
         except ValidateError as exc:
             raise ValidateError(
-                f"Error validating input argument {key}, type {type(val)}: {exc!r}"
+                f"Error validating input argument {key} for {obj.name}, type {type(val)}: {exc!r}"
             ) from None
 
     def safe_get_multi(self, keys, obj, getter=None, *, default=Empty):
@@ -218,7 +259,7 @@ class IsSetHandler(BaseHandler):
 
     def handle(self, obj, getter):
         key = self.safe_get(0, obj, getter=getter)
-        return key in getter.handlers
+        return key in getter.ctx
 
     def validate_output(self, obj, value):
         return operator.truth(value)
@@ -232,10 +273,10 @@ class GetHandler(BaseHandler):
 
     def handle(self, obj, getter):
         key = self.safe_get("name", obj, getter=getter)
-        h = getter.handlers.get(key)
-        if h is None:
+        result = getter.ctx.get_var(key)
+        if result is Empty:
             return self.safe_get("fallback", obj, getter=getter)
-        return h(getter.handlers, *getter.args, **getter.kwargs)
+        return ExpOp(key).eval(getter.ctx, *getter.args, **getter.kwargs)
 
 
 class S_Handler(BaseHandler):
@@ -305,6 +346,15 @@ class CommentHandler(BaseHandler):
         return None
 
 
+class SetVarHandler(BaseHandler):
+    input_validators = (Arg.string("lhs"), Arg.present("rhs"))
+
+    def handle(self, obj, getter):
+        key, val = self.safe_get_all(obj, getter)
+        getter.ctx.set_var(key, val)
+        return val
+
+
 LOGIC_HANDLERS = {
     "||": OrHandler(),
     "&&": AndHandler(),
@@ -359,6 +409,7 @@ MISC_HANDLERS = {
     "unsafe_call": UnsafeCallHandler(),
     "dict": DictHandler(),
     "comment": CommentHandler(),
+    "set_var": SetVarHandler(),
 }
 
 BASIC_HANDLERS = LOGIC_HANDLERS | MATH_HANDLERS | MISC_HANDLERS
