@@ -82,6 +82,7 @@ class FilterRefs:
             "sigma": ss.sigma,
             "sigma_next": ss.sigma_next,
             "sigma_down": ss.sigma_down,
+            "sigma_up": ss.sigma_up,
             "sigma_prev": ss.sigma_prev,
             "hist_len": len(ss.hist),
             "sigma_min": ms.sigma_min.item(),

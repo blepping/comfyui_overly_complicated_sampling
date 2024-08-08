@@ -107,7 +107,7 @@ class BaseHandler:
         except ValidateError as exc:
             raise ValidateError(
                 f"Error validating input argument {key} for {obj.name}, type {type(val)}: {exc!r}"
-            ) from None
+            )
 
     def safe_get_multi(self, keys, obj, getter=None, *, default=Empty):
         return (self.safe_get(k, obj, getter, default=default) for k in keys)
