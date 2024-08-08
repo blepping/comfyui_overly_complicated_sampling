@@ -159,7 +159,8 @@ class ScaleHandler(NormHandler):
         if abs_scale:
             scale = tuple(int(v) for v in scale)
         else:
-            scale = (int(t.shape[-1] * scale[0]), int(t.shape[-2] * scale[1]))
+            scale = (int(t.shape[-2] * scale[0]), int(t.shape[-1] * scale[1]))
+        print("SCALE", t.shape[-2:], "->", scale)
         if not all(v > 0 for v in scale):
             raise ValueError(f"Invalid scale: scale values must be > 0, got: {scale!r}")
         return latent.scale_samples(t, scale[1], scale[0], mode=mode)
@@ -179,6 +180,14 @@ class NoiseHandler(NormHandler):
         )
         ns = latent.get_noise_sampler(typ, t, smin, smax, normalized=False)
         return ns(s, sn)
+
+
+class ShapeHandler(expr.BaseHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def handle(self, obj, getter):
+        t = self.safe_get("tensor", obj, getter)
+        return expr.types.ExpTuple((*t.shape,))
 
 
 class UnsafeTorchTensorMethodHandler(NormHandler):
@@ -613,6 +622,7 @@ TENSOR_OP_HANDLERS = {
     "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),
+    "t_shape": ShapeHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),
 }
