@@ -48,6 +48,9 @@ class Restart:
             result = result.item()
         return result * self.s_noise
 
+    def __repr__(self):
+        return f"<Restart: s_noise={self.s_noise:.04}, immiscible={self.immiscible}>"
+
     @classmethod
     def simple_schedule(cls, sigmas, start_step, schedule=(), max_iter=1000):
         if sigmas.ndim != 1:

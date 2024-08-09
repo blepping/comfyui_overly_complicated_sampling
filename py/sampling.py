@@ -91,6 +91,7 @@ def composable_sampler(
             ss.update(0, step=step, substep=0)
             if step != 0:
                 nsc.reset_cache()
+                nsc.update_x(x)
                 ss.hist.reset()
                 for ms in merge_samplers:
                     ms.reset()
