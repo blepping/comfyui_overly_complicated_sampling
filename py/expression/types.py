@@ -178,9 +178,8 @@ class ExpFunAp(ExpBase):
         return f"<FUNAP {self.name}\n{pad}{self.args.pretty_string(depth + 1)}{kwargs_str}\n{pad[:-2]}>"
 
     def __repr__(self):
-        return (
-            f"<FUNAP:{self.name}{self.args}{f", {self.kwargs}" if self.kwargs else ''}>"
-        )
+        kwargs_str = f", {self.kwargs}" if self.kwargs else ""
+        return f"<FUNAP:{self.name}{self.args}{kwargs_str}>"
 
 
 class ExpBoundFunAp(ExpFunAp):
