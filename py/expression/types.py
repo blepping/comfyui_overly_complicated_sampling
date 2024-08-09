@@ -174,7 +174,8 @@ class ExpFunAp(ExpBase):
 
     def pretty_string(self, depth=0):
         pad = " " * (depth + 1) * 2
-        return f"<FUNAP {self.name}\n{pad}{self.args.pretty_string(depth + 1)}{f", {self.kwargs.pretty_string(depth + 1)}" if self.kwargs else ''}\n{pad[:-2]}>"
+        kwargs_str = f", {self.kwargs.pretty_string(depth + 1)}" if self.kwargs else ""
+        return f"<FUNAP {self.name}\n{pad}{self.args.pretty_string(depth + 1)}{kwargs_str}\n{pad[:-2]}>"
 
     def __repr__(self):
         return (
