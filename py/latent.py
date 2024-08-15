@@ -112,3 +112,31 @@ else:
         if noise_type != "gaussian":
             raise ValueError("Only gaussian noise supported")
         return lambda _s, _sn: torch.randn_like(x)
+
+
+if "nnlatentupscale" in EXT:
+
+    def scale_nnlatentupscale(
+        mode,
+        latent,
+        scale=2.0,
+        *,
+        scale_factor=0.13025,
+        __nlu_module=EXT["nnlatentupscale"],
+    ):
+        module = __nlu_module
+        mode = {"sdxl": "SDXL", "sd1": "SD 1.x"}.get(mode)
+        if mode is None:
+            raise ValueError("Bad mode")
+        node = module.NNLatentUpscale()
+        model = module.latent_resizer.LatentResizer.load_model(
+            node.weight_path[mode], latent.device, latent.dtype
+        ).to(device=latent.device)
+        result = (
+            model(scale_factor * latent, scale=scale).to(
+                dtype=latent.dtype, device=latent.device
+            )
+            / scale_factor
+        )
+        del model
+        return result

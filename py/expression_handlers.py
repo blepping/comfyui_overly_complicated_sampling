@@ -14,6 +14,7 @@ ALLOW_ALL_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_ALL_UNSAFE") is not None
 
 EXT_BLEH = EXT.get("bleh")
 EXT_SONAR = EXT.get("sonar")
+EXT_NNLATENTUPSCALE = EXT.get("nnlatentupscale")
 
 if "bleh" in EXT:
     BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES
@@ -611,6 +612,27 @@ if EXT_SONAR:
             return ns(None, None)
 
     HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
+
+if EXT_NNLATENTUPSCALE:
+    from .latent import scale_nnlatentupscale
+
+    class ScaleNNLatentUpscaleHandler(expr.BaseHandler):
+        input_validators = (
+            expr.Arg.tensor("tensor"),
+            expr.Arg.string("mode", "sd1"),
+            expr.Arg.numeric_scalar("scale", 2.0),
+        )
+        output_validator = expr.Arg.tensor("output")
+
+        def handle(self, obj, getter):
+            tensor, mode, scale = self.safe_get_all(obj, getter)
+            if mode not in {"sd1", "sdxl"}:
+                raise ValueError(
+                    "Bad mode for t_scale_nnlatentupscale: must be either sd15 or sdxl"
+                )
+            return scale_nnlatentupscale(mode, tensor, scale)
+
+    HANDLERS["t_scale_nnlatentupscale"] = ScaleNNLatentUpscaleHandler()
 
 TENSOR_OP_HANDLERS = {
     "t_norm": NormHandler(),

@@ -135,6 +135,8 @@ Available in model filters, with the exception of the `input` filter.
  | <td colspan=3 align=left>Rolls a tensor along the specified dimensions. If amount is >= -1.0 and < 1.0 this will be interpreted as a percentage. <br/> **Example:** `t_roll(some_tensor, 10, (-2,))`</td> |
  |⬤| `t_scale` | tensor:`T`, scale:`SN \| NS`, mode:`SY(bicubic)`, absolute_scale:`B(false)` | `T` |
  | <td colspan=3 align=left>Scales a tensor. If scale is a tuple, it will be interpreted as `(height, width)`. When `absolute_scale` is not set, the scales will be interpreted as percentages otherwise absolute values will be used. <br/> Example: `t_scale(some_tensor, (0.75, 0.5), 'bilinear)`</td> |
+ |⬤| `t_scale_nnlatentupscale` | tensor:`T`, mode:`SY(sd1)`, scale:`SN(2.0)` | `T` |
+ | <td colspan=3 align=left>Available if you have [ComfyUi_NNLatentUpscale](https://github.com/Ttl/ComfyUi_NNLatentUpscale) installed. `mode` must be one of `sd1` or `sdxl`. `scale` should be between 1.0 and 2.0 (may or may not work out of that range).<br/> **Example:** `t_scale_nnlatentupscale(some_tensor, 'sdxl, 1.5)`</td> |
  |⬤| `t_shape` | tensor:`T` | `SN` |
  | <td colspan=3 align=left>Returns a tensor's shape as a tuple. <br/> Example: `shp := t_shape(some_tensor); width := shp[-1]; height := shp[-2]`</td> |
  |⬤| `t_std` | tensor:`T`, dim:`SN(-3, -2, -1)` | `T` |

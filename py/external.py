@@ -11,8 +11,11 @@ with contextlib.suppress(ImportError, NotImplementedError):
     MODULES["bleh"] = bleh.py
 
 with contextlib.suppress(ImportError, NotImplementedError):
-    sonar = importlib.import_module("custom_nodes.ComfyUI-sonar")
-    MODULES["sonar"] = sonar.py
+    MODULES["sonar"] = importlib.import_module("custom_nodes.ComfyUI-sonar").py
 
+with contextlib.suppress(ImportError, NotImplementedError):
+    MODULES["nnlatentupscale"] = importlib.import_module(
+        "custom_nodes.ComfyUi_NNLatentUpscale"
+    )
 
 __all__ = ("MODULES",)
