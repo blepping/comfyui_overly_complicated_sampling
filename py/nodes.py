@@ -18,6 +18,10 @@ eta: 1.0
 class SamplerNode:
     RETURN_TYPES = ("SAMPLER",)
     CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Overly Complicated Sampling main sampler node. Can be connected to a SamplerCustom or other sampler node that supports a SAMPLER input."
+    OUTPUT_TOOLTIPS = (
+        "SAMPLER that can be connected to a SamplerCustom or other sampler node that supports a SAMPLER input.",
+    )
 
     FUNCTION = "go"
 
@@ -25,16 +29,27 @@ class SamplerNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "groups": ("OCS_GROUPS",),
+                "groups": (
+                    "OCS_GROUPS",
+                    {
+                        "tooltip": "Connect OCS substep groups here which are output from the OCS Group node."
+                    },
+                ),
             },
             "optional": {
-                "params_opt": ("OCS_PARAMS",),
+                "params_opt": (
+                    "OCS_PARAMS",
+                    {
+                        "tooltip": "Optionally connect parameters like custom noise here. Output from the OCS Param or OCS MultiParam nodes.",
+                    },
+                ),
                 "parameters": (
                     "STRING",
                     {
                         "default": DEFAULT_YAML_PARAMS,
                         "multiline": True,
                         "dynamicPrompts": False,
+                        "tooltip": "The text parameter block allows setting custom parameters using YAML (recommended) or JSON. Optional, may be left blank.",
                     },
                 ),
             },
@@ -68,6 +83,10 @@ class SamplerNode:
 class GroupNode:
     RETURN_TYPES = ("OCS_GROUPS",)
     CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Over Complicated Sampling group definition node."
+    OUTPUT_TOOLTIPS = (
+        "This output can be connect to another OCS Group node or an OCS Sampler node.",
+    )
 
     FUNCTION = "go"
 
@@ -75,27 +94,65 @@ class GroupNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "merge_method": (tuple(MERGE_SUBSTEPS_CLASSES.keys()),),
-                "time_mode": (("step", "step_pct", "sigma"),),
+                "merge_method": (
+                    tuple(MERGE_SUBSTEPS_CLASSES.keys()),
+                    {
+                        "tooltip": "The merge method determines how multiple substeps are combined together during sampling.",
+                    },
+                ),
+                "time_mode": (
+                    ("step", "step_pct", "sigma"),
+                    {
+                        "tooltip": "The time mode controls how the time_start and time_end parameters are interpreted. The default of step is generally easiest to use.",
+                    },
+                ),
                 "time_start": (
                     "FLOAT",
-                    {"default": 0, "min": 0.0, "step": 0.1, "round'": False},
+                    {
+                        "default": 0,
+                        "min": 0.0,
+                        "step": 0.1,
+                        "round'": False,
+                        "tooltip": "The start time this group will be active (inclusive).",
+                    },
                 ),
                 "time_end": (
                     "FLOAT",
-                    {"default": 999, "min": 0.0, "step": 0.1, "round'": False},
+                    {
+                        "default": 999,
+                        "min": 0.0,
+                        "step": 0.1,
+                        "round'": False,
+                        "tooltip": "The group will become inactive when the current time is GREATER than the specified end time.",
+                    },
                 ),
-                "substeps": ("OCS_SUBSTEPS",),
+                "substeps": (
+                    "OCS_SUBSTEPS",
+                    {
+                        "tooltip": "Connect output from an OCS Substeps node here.",
+                    },
+                ),
             },
             "optional": {
-                "groups_opt": ("OCS_GROUPS",),
-                "params_opt": ("OCS_PARAMS",),
+                "groups_opt": (
+                    "OCS_GROUPS",
+                    {
+                        "tooltip": "You may optionally connect the output from another OCS Group node here. Only one group per step is used, matching (based on time or other constraints) starts with the OCS Group node furthest from the OCS Sampler.",
+                    },
+                ),
+                "params_opt": (
+                    "OCS_PARAMS",
+                    {
+                        "tooltip": "Optionally connect parameters like custom noise here. Output from the OCS Param or OCS MultiParam nodes.",
+                    },
+                ),
                 "parameters": (
                     "STRING",
                     {
                         "default": DEFAULT_YAML_PARAMS,
                         "multiline": True,
                         "dynamicPrompts": False,
+                        "tooltip": "The text parameter block allows setting custom parameters using YAML (recommended) or JSON. Optional, may be left blank.",
                     },
                 ),
             },
@@ -136,6 +193,10 @@ class GroupNode:
 class SubstepsNode:
     RETURN_TYPES = ("OCS_SUBSTEPS",)
     CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Overly Complicated Sampling substeps definition node. Used to define a sampler type and other sampler-specific parameters."
+    OUTPUT_TOOLTIPS = (
+        "This output can be connected to another OCS Substeps node or an OCS Group node.",
+    )
 
     FUNCTION = "go"
 
@@ -143,18 +204,42 @@ class SubstepsNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "substeps": ("INT", {"default": 1, "min": 1, "max": 1000}),
-                "step_method": (tuple(STEP_SAMPLERS.keys()),),
+                "substeps": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 1000,
+                        "tooltip": "Number of substeps to use for each step, in other words (depending on the OCS Group merge strategy) it may split a step into multiple smaller steps.",
+                    },
+                ),
+                "step_method": (
+                    tuple(STEP_SAMPLERS.keys()),
+                    {
+                        "tooltip": "In other words, the sampler.",
+                    },
+                ),
             },
             "optional": {
-                "substeps_opt": ("OCS_SUBSTEPS",),
-                "params_opt": ("OCS_PARAMS",),
+                "substeps_opt": (
+                    "OCS_SUBSTEPS",
+                    {
+                        "tooltip": "Optionally connect another OCS Substeps node here. Substeps will run in order, starting from the OCS Substeps node FURTHEST from the OCS Group node.",
+                    },
+                ),
+                "params_opt": (
+                    "OCS_PARAMS",
+                    {
+                        "tooltip": "Optionally connect parameters like custom noise here. Output from the OCS Param or OCS MultiParam nodes.",
+                    },
+                ),
                 "parameters": (
                     "STRING",
                     {
                         "default": DEFAULT_YAML_PARAMS,
                         "multiline": True,
                         "dynamicPrompts": False,
+                        "tooltip": "The text parameter block allows setting custom parameters using YAML (recommended) or JSON. Optional, may be left blank.",
                     },
                 ),
             },
@@ -195,6 +280,11 @@ class Wildcard(str):
 class ParamNode:
     RETURN_TYPES = ("OCS_PARAMS",)
     CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Overly Complicated Sampling parameter definition node. Used to set parameters like custom noise types that require an input."
+    OUTPUT_TYPES = (
+        "Can be connected to another OCS Param or OCS MultiParam node or any other OCS node that takes OCS_PARAMS as an input.",
+    )
+
     FUNCTION = "go"
 
     WC = Wildcard("*")
@@ -210,17 +300,33 @@ class ParamNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "key": (tuple(cls.OCS_PARAM_TYPES.keys()),),
-                "value": (cls.WC,),
+                "key": (
+                    tuple(cls.OCS_PARAM_TYPES.keys()),
+                    {
+                        "tooltip": "Used to set the type of custom parameter.",
+                    },
+                ),
+                "value": (
+                    cls.WC,
+                    {
+                        "tooltip": "Connect the type of value expected by the key. Allows connecting output from any type of node HOWEVER if it is the wrong type expected by the key you will get an error when you run the workflow.",
+                    },
+                ),
             },
             "optional": {
-                "params_opt": ("OCS_PARAMS",),
+                "params_opt": (
+                    "OCS_PARAMS",
+                    {
+                        "tooltip": "You may optionally connect the output from other OCS Param or OCS MultiParam nodes here to set multiple parameters.",
+                    },
+                ),
                 "parameters": (
                     "STRING",
                     {
                         "default": "# Additional YAML or JSON parameters\n",
                         "multiline": True,
                         "dynamicPrompts": False,
+                        "tooltip": "The text parameter block allows setting custom parameters using YAML (recommended) or JSON. Optional, may be left blank.",
                     },
                 ),
             },
@@ -246,19 +352,34 @@ class ParamNode:
 class MultiParamNode:
     RETURN_TYPES = ("OCS_PARAMS",)
     CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Overly Complicated Sampling parameter definition node. Used to set parameters like custom noise types that require an input. Like the OCS Param node but allows setting multiple parameters at the same time."
+    OUTPUT_TYPES = (
+        "Can be connected to another OCS Param or OCS MultiParam node or any other OCS node that takes OCS_PARAMS as an input.",
+    )
+
     FUNCTION = "go"
 
     PARAM_COUNT = 5
 
     @classmethod
     def INPUT_TYPES(cls):
-        param_keys = (("", *ParamNode.OCS_PARAM_TYPES.keys()),)
+        param_keys = (
+            ("", *ParamNode.OCS_PARAM_TYPES.keys()),
+            {
+                "tooltip": "Used to set the type of custom parameter.",
+            },
+        )
         return {
             "required": {
                 f"key_{idx}": param_keys for idx in range(1, cls.PARAM_COUNT + 1)
             },
             "optional": {
-                "params_opt": ("OCS_PARAMS",),
+                "params_opt": (
+                    "OCS_PARAMS",
+                    {
+                        "tooltip": "You may optionally connect the output from other OCS MultiParam or OCS Param nodes here to set multiple parameters.",
+                    },
+                ),
                 "parameters": (
                     "STRING",
                     {
@@ -268,11 +389,17 @@ class MultiParamNode:
 """,
                         "multiline": True,
                         "dynamicPrompts": False,
+                        "tooltip": "The text parameter block allows setting custom parameters using YAML (recommended) or JSON. Optional, may be left blank.",
                     },
                 ),
             }
             | {
-                f"value_opt_{idx}": (ParamNode.WC,)
+                f"value_opt_{idx}": (
+                    ParamNode.WC,
+                    {
+                        "tooltip": "Connect the type of value expected by the corresponding key. Allows connecting output from any type of node HOWEVER if it is the wrong type expected by the corresponding key you will get an error when you run the workflow.",
+                    },
+                )
                 for idx in range(1, cls.PARAM_COUNT + 1)
             },
         }
@@ -305,14 +432,31 @@ class MultiParamNode:
 class SimpleRestartSchedule:
     RETURN_TYPES = ("SIGMAS",)
     CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Overly Complicated Sampling simple Restart schedule node. Allows generating a Restart sampling schedule based on a text definition."
+    OUTPUT_TYPES = (
+        "Can be connected to an OCS Sampler or RestartSampler node. Do not connect directly to a sampler that doesn't have built-in support for Restart schedules.",
+    )
+
     FUNCTION = "go"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "sigmas": ("SIGMAS",),
-                "start_step": ("INT", {"min": 0, "default": 0}),
+                "sigmas": (
+                    "SIGMAS",
+                    {
+                        "tooltip": "Connect the output from another scheduler node (i.e. BasicScheduler) here.",
+                    },
+                ),
+                "start_step": (
+                    "INT",
+                    {
+                        "min": 0,
+                        "default": 0,
+                        "tooltip": "Step the restart schedule definition starts applying. Zero-based.",
+                    },
+                ),
             },
             "optional": {
                 "schedule": (
@@ -327,6 +471,7 @@ class SimpleRestartSchedule:
 """,
                         "multiline": True,
                         "dynamicPrompts": False,
+                        "tooltip": "Define a schedule here using YAML (recommended) or JSON.",
                     },
                 ),
             },
@@ -348,14 +493,29 @@ class SimpleRestartSchedule:
 class ModelSetMaxSigmaNode:
     RETURN_TYPES = ("MODEL",)
     CATEGORY = "hacks"
+    DESCRIPTION = "Allows forcing a model's maximum and minumum sigmas to a specified value. You generally do NOT want to connect this to a sampler node. Connect it to a scheduler node (i.e. BasicScheduler) instead."
+    OUTPUT_TOOLTIPS = (
+        "Patched model. Can be connected to a scheduler node (i.e. BasicScheduler). Generally NOT recommended to connect to an actual sampler.",
+    )
+
     FUNCTION = "go"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "mode": (("recalculate", "simple_multiply"),),
+                "model": (
+                    "MODEL",
+                    {
+                        "tooltip": "Model to patch with the min/max sigmas.",
+                    },
+                ),
+                "mode": (
+                    ("recalculate", "simple_multiply"),
+                    {
+                        "tooltip": "Mode use for setting sigmas in the patched model. Recalculate should generally be more accurate.",
+                    },
+                ),
                 "sigma_max": (
                     "FLOAT",
                     {
@@ -363,7 +523,8 @@ class ModelSetMaxSigmaNode:
                         "min": -10000.0,
                         "max": 10000.0,
                         "step": 0.01,
-                        "round'": False,
+                        "round": False,
+                        "tooltip": "You can set the maximum sigma here. If you use a negative value, it will be interpreted as the absolute value for the max sigma. If you use a positive value it will be interpreted as a percentage (where 1.0 signified 100%). Schedules generated with the patched model should start from sigma_max (or close to it).",
                     },
                 ),
                 "fake_sigma_min": (
@@ -373,7 +534,8 @@ class ModelSetMaxSigmaNode:
                         "min": 0.0,
                         "max": 1000.0,
                         "step": 0.01,
-                        "round'": False,
+                        "round": False,
+                        "tooltip": "You can set the minimum sigma here. Disabled if set to 0. If you use a negative value, it will be interpreted as the absolute value for the max sigma. If you use a positive value it will be interpreted as a percentage (where 1.0 signified 100%). Schedules generated with the patched model should end with [sigma_min, 0]. NOTE: May not work with some schedulers. I recommend leaving this at 0 unless you know you need it (and even then it may not work).",
                     },
                 ),
             }
