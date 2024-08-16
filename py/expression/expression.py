@@ -37,7 +37,7 @@ class Expression:
         | [?:]               # Ternary
         | \[ | ]             # Index
         | \.\.\.             # Index ellipsis
-        | '[\w.]+            # Symbol
+        | '[-\w.]+           # Symbol
         | `?[a-z][\w.]*`?    # Function/variable names
     )
     \s*
