@@ -1,5 +1,6 @@
 import functools
 
+from ..latent import ImageBatch
 from .util import torch
 from .types import Empty
 
@@ -28,6 +29,10 @@ class Arg:
     @classmethod
     def tensor(cls, name):
         return cls(name, validator=ValidateArg.validate_tensor)
+
+    @classmethod
+    def image(cls, name):
+        return cls(name, validator=ValidateArg.validate_image)
 
     @classmethod
     def numeric(cls, name, default=Empty):
@@ -136,6 +141,14 @@ class ValidateArg:
     def validate_tensor(idx, val):
         if not isinstance(val, torch.Tensor):
             raise ValidateError(f"Expected tensor argument at {idx}, got {type(val)}")
+        return val
+
+    @staticmethod
+    def validate_image(idx, val):
+        if not isinstance(val, ImageBatch):
+            raise ValidateError(
+                f"Expected PIL Image argument at {idx}, got {type(val)}"
+            )
         return val
 
     @staticmethod

@@ -114,7 +114,7 @@ class ModelCallCache:
         self.cache = ModelCallCacheConfig(**fallback(cache, {}))
         filtargs = fallback(filter, {}).copy()
         self.filters = {}
-        for key in ("input", "denoised", "jdenoised", "cond", "uncond"):
+        for key in ("input", "denoised", "jdenoised", "cond", "uncond", "x"):
             filt = filtargs.pop(key, None)
             if filt is None:
                 continue
@@ -136,7 +136,7 @@ class ModelCallCache:
         if not self.filters:
             return result
         result = result.clone()
-        for key in ("denoised", "cond", "uncond", "jdenoised"):
+        for key in ("denoised", "cond", "uncond", "jdenoised", "x"):
             filt = self.filters.get(key)
             if filt is None:
                 continue

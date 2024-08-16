@@ -1,9 +1,28 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 
+import folder_paths
+import latent_preview
+
+from comfy.taesd.taesd import TAESD
 from comfy.utils import bislerp
+from comfy import latent_formats
 
 from .external import MODULES as EXT
+
+
+def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
+    min_val, max_val = (
+        latent.amin(dim=dim, keepdim=True),
+        latent.amax(dim=dim, keepdim=True),
+    )
+    normalized = (latent - min_val).div_(max_val - min_val)
+    return (
+        normalized.mul_(target_max - target_min)
+        .add_(target_min)
+        .clamp_(target_min, target_max)
+    )
 
 
 # The following is modified to work with latent images of ~0 mean from https://github.com/Jamy-L/Pytorch-Contrast-Adaptive-Sharpening/tree/main.
@@ -84,6 +103,114 @@ def contrast_adaptive_sharpening(x, amount=0.8, *, epsilon=1e-06):
     output = ((b + d + f + h) * w + e) * div
 
     return output.real.clamp(x.min(), x.max())
+
+
+class ImageBatch(tuple):
+    __slots__ = ()
+
+
+class OCSTAESD:
+    latent_formats = {
+        "sd15": latent_formats.SD15(),
+        "sdxl": latent_formats.SDXL(),
+    }
+
+    @classmethod
+    def get_decoder_name(cls, fmt):
+        return cls.latent_formats[fmt].taesd_decoder_name
+
+    @classmethod
+    def get_encoder_name(cls, fmt):
+        result = cls.get_decoder_name(fmt)
+        if not result.endswith("_decoder"):
+            raise RuntimeError(
+                f"Could not determine TAESD encoder name from {result!r}"
+            )
+        return f"{result[:-7]}encoder"
+
+    @classmethod
+    def get_taesd_path(cls, name):
+        taesd_path = next(
+            (
+                fn
+                for fn in folder_paths.get_filename_list("vae_approx")
+                if fn.startswith(name)
+            ),
+            "",
+        )
+        if taesd_path == "":
+            raise RuntimeError(f"Could not get TAESD path for {name!r}")
+        return folder_paths.get_full_path("vae_approx", taesd_path)
+
+    @classmethod
+    def decode(cls, fmt, latent):
+        latent_format = cls.latent_formats[fmt]
+        # rv = latent_format.process_out(1.0)
+        filename = cls.get_taesd_path(cls.get_decoder_name(fmt))
+        model = TAESD(
+            decoder_path=filename, latent_channels=latent_format.latent_channels
+        ).to(latent.device)
+        # print("DEC INPUT ORIG", latent.min(), latent.max())
+        # if torch.any(latent.max() > rv) or torch.any(latent.min() < -rv):
+        #     sv = latent.new((-rv, rv))
+        #     latent = normalize_to_scale(
+        #         latent,
+        #         latent.amin(dim=(-3, -2, -1), keepdim=True).maximum(sv[0]),
+        #         latent.amax(dim=(-3, -2, -1), keepdim=True).minimum(sv[1]),
+        #         dim=(-3, -2, -1),
+        #     )
+        # print("DEC INPUT", latent.min(), latent.max())
+        # result = model.decode(latent.clamp(-rv, rv)).movedim(1, 3)
+        result = model.decode(latent).movedim(1, 3)
+        # print("DEC RESULT", result.shape, result.isnan().any().item())
+        return ImageBatch(
+            latent_preview.preview_to_image(result[batch_idx])
+            for batch_idx in range(result.shape[0])
+        )
+
+    @staticmethod
+    def img_to_encoder_input(imgbatch):
+        return torch.stack(
+            tuple(
+                torch.tensor(np.array(img), dtype=torch.float32)
+                .div_(127)
+                .sub_(1.0)
+                .clamp_(-1, 1)
+                for img in imgbatch
+            ),
+            dim=0,
+        ).movedim(-1, 1)
+
+    @classmethod
+    def encode(cls, fmt, imgbatch, latent, *, normalize_output=False):
+        latent_format = cls.latent_formats[fmt]
+        rv = latent_format.process_out(1.0)
+        filename = cls.get_taesd_path(cls.get_encoder_name(fmt))
+        model = TAESD(
+            encoder_path=filename, latent_channels=latent_format.latent_channels
+        ).to(device=latent.device)
+        result = model.encode(cls.img_to_encoder_input(imgbatch).to(latent.device))
+        # print(
+        #     "ENC RESULT ORIG",
+        #     result.min(),
+        #     result.max(),
+        # )
+        # if torch.any(result.max() > rv) or torch.any(result.min() < -rv):
+        #     sv = result.new((-rv, rv))
+        #     result = normalize_to_scale(
+        #         result,
+        #         result.amin(dim=(-3, -2, -1), keepdim=True).maximum(sv[0]),
+        #         result.amax(dim=(-3, -2, -1), keepdim=True).minimum(sv[1]),
+        #         dim=(-3, -2, -1),
+        #     )
+        # print(
+        #     "ENC RESULT",
+        #     result.shape,
+        #     result.isnan().any().item(),
+        #     result.min(),
+        #     result.max(),
+        # )
+        return result.to(latent.dtype).clamp(-rv, rv)
 
 
 if "bleh" in EXT:

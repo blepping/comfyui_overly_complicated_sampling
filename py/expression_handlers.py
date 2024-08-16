@@ -2,12 +2,14 @@ import os
 
 import torch
 import numpy as np
+import PIL.Image as PILImage
 
 from . import expression as expr
 from . import latent
 
 from .external import MODULES as EXT
 from .utils import scale_noise, resolve_value
+from .latent import OCSTAESD, ImageBatch
 
 ALLOW_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS") is not None
 ALLOW_ALL_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_ALL_UNSAFE") is not None
@@ -77,6 +79,7 @@ class RollHandler(NormHandler):
                     "Cannot use percentage based amount with multiple roll dimensions",
                 )
             amount = int(tensor.shape[dim[0]] * amount)
+        amount = (amount,) * len(dim)
         return tensor.roll(amount, dims=dim)
 
 
@@ -189,6 +192,80 @@ class ShapeHandler(expr.BaseHandler):
     def handle(self, obj, getter):
         t = self.safe_get("tensor", obj, getter)
         return expr.types.ExpTuple((*t.shape,))
+
+
+class TAESDDecodeHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.string("mode", "sd15"),
+    )
+    validate_output = expr.Arg.image("output")
+
+    def handle(self, obj, getter):
+        t, mode = self.safe_get_all(obj, getter)
+        return OCSTAESD.decode(mode, t)
+
+
+class TAESDEncodeHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.image("image"),
+        expr.Arg.tensor("reference_latent"),
+        expr.Arg.string("mode", "sd15"),
+    )
+    validate_output = expr.Arg.tensor("output")
+
+    def handle(self, obj, getter):
+        imgbatch, ref, mode = self.safe_get_all(obj, getter)
+        return OCSTAESD.encode(mode, imgbatch, ref)
+
+
+class ImgShapeHandler(expr.BaseHandler):
+    input_validators = (expr.Arg.tensor("image"),)
+
+    def handle(self, obj, getter):
+        imgbatch = self.safe_get("image", obj, getter)
+        if len(imgbatch) == 0:
+            raise ValueError("Can't get shape of empty image batch")
+        isz = imgbatch[0].size
+        return expr.types.ExpTuple((isz[1], isz[0]))
+
+
+class ImgPILResizeHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.image("image"),
+        expr.Arg.one_of(
+            "size",
+            (
+                expr.ValidateArg.validate_numeric_scalar,
+                expr.ValidateArg.validate_numscalar_sequence,
+            ),
+        ),
+        expr.Arg.string("resample_mode", "bicubic"),
+        expr.Arg.boolean("absolute_scale", False),
+    )
+    validate_output = expr.Arg.image("output")
+
+    def handle(self, obj, getter):
+        imgbatch, size, resample_mode, abs_scale = self.safe_get_all(obj, getter)
+        if not isinstance(size, tuple):
+            size = (size, size)
+        if len(size) != 2 or not all(n > 0 for n in size):
+            raise ValueError(
+                "Image resize size parameter must be a positive non-zero number or tuple of positive non-zero height, width"
+            )
+        try:
+            resample_mode = PILImage.Resampling[resample_mode.upper()]
+        except KeyError:
+            raise ValueError("Bad resample mode")
+        if len(imgbatch) == 0:
+            return imgbatch
+        if abs_scale:
+            size = tuple(int(v) for v in size)
+        else:
+            imgsize = imgbatch[0].size
+            size = (int(imgsize[1] * size[0]), int(imgsize[0] * size[1]))
+        new_size = (size[1], size[0])
+        return ImageBatch(img.resize(new_size, resample_mode) for img in imgbatch)
 
 
 class UnsafeTorchTensorMethodHandler(NormHandler):
@@ -645,8 +722,16 @@ TENSOR_OP_HANDLERS = {
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),
     "t_shape": ShapeHandler(),
+    "t_taesd_decode": TAESDDecodeHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),
 }
 
+IMAGE_OP_HANDLERS = {
+    "img_taesd_encode": TAESDEncodeHandler(),
+    "img_shape": ImgShapeHandler(),
+    "img_pil_resize": ImgPILResizeHandler(),
+}
+
 HANDLERS |= TENSOR_OP_HANDLERS
+HANDLERS |= IMAGE_OP_HANDLERS

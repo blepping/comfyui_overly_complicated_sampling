@@ -141,9 +141,24 @@ Available in model filters, with the exception of the `input` filter.
  | <td colspan=3 align=left>Returns a tensor's shape as a tuple. <br/> Example: `shp := t_shape(some_tensor); width := shp[-1]; height := shp[-2]`</td> |
  |⬤| `t_std` | tensor:`T`, dim:`SN(-3, -2, -1)` | `T` |
  | <td colspan=3 align=left>Tensor std, second argument is dimensions. <br/> **Example:** `t_std(some_tensor, (-2, -1))`</td> |
+ |⬤| `t_taesd_decode` | tensor:`T`, mode:`SY(sd15)` | `T` |
+ | <td colspan=3 align=left>Decodes a latent tensor used TAESD. Mode must be one of `sd15`, `sdxl`. Only works if the appropriate models are in `vae_approx` <br/> **Example:** `t_taesd_decode(some_tensor, 'sd15)`</td> |
  |⬤| `unsafe_tensor_method` | `T`, `SY`, `*`\* | `*` |
  | <td colspan=3 align=left>Unsafe tensor method call. See note below. <br/> **Example:** `unsafe_tensor_method(some_tensor, 'mul, 10)`</td> |
  |⬤| `unsafe_torch` | path:`SY` | `*` |
  | <td colspan=3 align=left>Unsafe Torch module attribute access. See note below. <br/> **Example:** `unsafe_torch('nn.functional.interpolate)`</td> |
 
 **Note on `unsafe_tensor_method` and `unsafe_torch`**: These functions are disabled by default. If the environment variable `COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS` is set to anything then you can use `unsafe_tensor_method` with a whitelisted set of methods (best effort to avoid anything actually unsafe). If the environment variable `COMFYUI_OCS_ALLOW_ALL_UNSAFE` is set to anything then `unsafe_torch` is enabled and `unsafe_tensor_method` will allow calling any method. ***WARNING***: Allowing _all_ unsafe with workflows you don't trust is _not_ recommended and a malicious workflow will likely have access to anything ComfyUI can access. It is effectively the same as letting the workflow run an arbitrary script on your system.
+
+## Tensor Expression Functions
+
+`IMG` used here to donate the type for functions that take an image. This may actually be an image batch rather than a single image.
+
+ | | Name | Input | Output |
+ | :--- | :--- | :--- | :--- |
+ |⬤| `img_pil_resize` | image:`IMG`, size:`SN \| NS`, resample_mode:`SY(bicubic)`, absolute_scale:`B(false)` | `IMG` |
+ | <td colspan=3 align=left>Scales an image batch using Pillow's [`Image.resize`](https://pillow.readthedocs.io/en/stable/reference/Image.html#PIL.Image.Image.resize) function (follow link for information about resample modes, etc). If scale is a tuple, it will be interpreted as `(height, width)`. When `absolute_scale` is not set, the scales will be interpreted as percentages otherwise absolute values will be used. <br/> Example: `img_pil_resize(image_batch, (0.75, 0.5), 'lanczos)`</td> |
+ |⬤| `img_shape` | image:`IMG` | `SN` |
+ | <td colspan=3 align=left>Returns an image's shape as a tuple. Will fail if all the images in the batch aren't the same size. <br/> Example: `shp := img_shape(image_batch); width := shp[-1]; height := shp[-2]`</td> |
+ |⬤| `img_taesd_encode` | image:`IMG`, reference_latent: `T`, mode:`SY(sd15)` | `T` |
+ | <td colspan=3 align=left>Encodes an image batch into a latent tensor. The reference latent is only used to determine what device and type the output should be. Mode must be one of `sd15`, `sdxl`. Only works if the appropriate models are in `vae_approx`. <br/> **Example:** `img_taesd_encode(image_batch, some_tensor, 'sd15)`</td> |
