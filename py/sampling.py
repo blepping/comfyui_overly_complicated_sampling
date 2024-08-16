@@ -91,6 +91,7 @@ def composable_sampler(
             ss.update(0, step=step, substep=0)
             if step != 0:
                 nsc.reset_cache()
+                nsc.update_x(x)
                 ss.hist.reset()
                 for ms in merge_samplers:
                     ms.reset()
@@ -105,7 +106,6 @@ def composable_sampler(
             for idx in range(len(chunk_sigmas) - 1):
                 if idx > 0:
                     ss.update(idx, step=step, substep=0)
-                if step != 0:
                     nsc.update_x(x)
                 # print(
                 #     f"STEP {step + 1:>3}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03} || up={ss.sigma_up.item():.03}, down={ss.sigma_down.item():.03}"
