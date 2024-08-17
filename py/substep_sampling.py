@@ -199,7 +199,7 @@ class SamplerState:
         if preview_mode == "cond":
             preview = fallback(hi.denoised_cond, hi.denoised)
         elif preview_mode == "uncond":
-            preview = fallback(hi.uncond, hi.denoised)
+            preview = fallback(hi.denoised_uncond, hi.denoised)
         elif preview_mode == "raw":
             preview = hi.x
         else:
