@@ -1422,14 +1422,16 @@ class TDEStep(DESolverStep):
             )
 
             if t == ss.sigma and torch.equal(x[bidx], y):
+                mr_cached = True
                 mr = ss.hcur
                 mcc = 1
             else:
+                mr_cached = False
                 mr = ss.model(
                     y.unsqueeze(0), t, ss=ss, call_index=mcc, s_in=t.new_ones(1)
                 )
                 mcc += 1
-            return self.to_d(mr)[0]
+            return self.to_d(mr)[bidx if mr_cached else 0]
 
         result = torch.zeros_like(x)
         t = sigma_down.new_zeros(self.de_split + 1)
@@ -1439,7 +1441,7 @@ class TDEStep(DESolverStep):
             1,
             x.shape[0] + 1,
             desc="batch",
-            leave=True,
+            leave=False,
             disable=x.shape[0] == 1 or ss.disable_status,
         ):
             bidx = batch - 1
@@ -1630,6 +1632,7 @@ class TSDEStep(DESolverStep):
         if self.de_min_sigma is not None and s <= self.de_min_sigma:
             return (yield from self.euler_step(x, ss))
         delta = (ss.sigma - sigma_down).item()
+        bidx = 0
         mcc = 0
         pbar = None
         _b, c, h, w = x.shape
@@ -1662,12 +1665,20 @@ class TSDEStep(DESolverStep):
                 del y_flat
 
                 if mcc == 0 and torch.all(t == s):
+                    mr_cached = True
                     mr = ss.hcur
                     mcc = 1
                 else:
-                    mr = ss.model(y, t32.clamp(min=1e-05), ss=ss, call_index=mcc)
+                    mr_cached = False
+                    mr = ss.model(
+                        y,
+                        t32.clamp(min=1e-05),
+                        ss=ss,
+                        call_index=mcc,
+                        s_in=t.new_ones(1),
+                    )
                     mcc += 1
-                return -outer_self.to_d(mr).view(*flat_shape)
+                return -outer_self.to_d(mr)[bidx if mr_cached else 0].view(*flat_shape)
 
             @torch.no_grad()
             def g(self, t_rev, y_flat):
@@ -1697,7 +1708,15 @@ class TSDEStep(DESolverStep):
             delta * self.de_initial_step if self.de_adaptive else delta / self.de_split
         )
         results = []
-        for bidx in range(x.shape[0]):
+        for batch in tqdm.trange(
+            1,
+            x.shape[0] + 1,
+            desc="batch",
+            leave=False,
+            disable=x.shape[0] == 1 or ss.disable_status,
+        ):
+            bidx = batch - 1
+            mcc = 0
             sde = SDE()
             if self.de_batch_channels:
                 y_flat = x[bidx].flatten(start_dim=1)
@@ -1732,9 +1751,7 @@ class TSDEStep(DESolverStep):
                 bm=bm,
             )
             del y_flat
-            # print("DONE", ys.shape)
             results.append(ys[-1].view(1, c, h, w))
-            # result = ys[-1].reshape(-1, c, h, w)
             del ys
         result = torch.cat(results)
         del results
@@ -1874,6 +1891,7 @@ class DiffraxStep(DESolverStep):
         s, sn, sigma_down, sigma_up = self.de_get_step(ss, x)
         if self.de_min_sigma is not None and s <= self.de_min_sigma:
             return (yield from self.euler_step(x, ss))
+        bidx = 0
         mcc = 0
         _b, c, h, w = x.shape
         interrupted = None
@@ -1892,20 +1910,29 @@ class DiffraxStep(DESolverStep):
             del y_flat
 
             if not args and mcc == 0 and torch.all(t == s):
+                mr_cached = True
                 mr = ss.hcur
                 mcc = 1
             else:
+                mr_cached = False
                 try:
                     if not args:
-                        mr = ss.model(y, t32, ss=ss, call_index=mcc)
+                        mr = ss.model(y, t32, ss=ss, call_index=mcc, s_in=t.new_ones(1))
                     else:
                         print("TANGENTS")
-                        mr = ss.model(y, t32, ss=ss, call_index=mcc, tangents=args)
+                        mr = ss.model(
+                            y,
+                            t32,
+                            ss=ss,
+                            call_index=mcc,
+                            tangents=args,
+                            s_in=t.new_ones(1),
+                        )
                 except comfy.model_management.InterruptProcessingException as exc:
                     interrupted = exc
                     raise
                 mcc += 1
-            result = self.to_d(mr).reshape(*flat_shape)
+            result = self.to_d(mr)[bidx if mr_cached else 0].reshape(*flat_shape)
             return self.t2j(-result)
 
         if not self.de_fake_pure_callback:
@@ -1959,8 +1986,6 @@ class DiffraxStep(DESolverStep):
             dt0 = (t1 - t0) * self.de_initial_step
         if self.de_sde_mode:
             bm = diffrax.VirtualBrownianTree(
-                # t0,
-                # t1 + 1e-06,
                 t0=ss.sigmas.min().item(),
                 t1=ss.sigmas.max().item(),
                 tol=1e-06,
@@ -1970,7 +1995,15 @@ class DiffraxStep(DESolverStep):
             )
             term = diffrax.MultiTerm(term, diffrax.ControlTerm(g, bm))
         results = []
-        for bidx in range(x.shape[0]):
+        for batch in tqdm.trange(
+            1,
+            x.shape[0] + 1,
+            desc="batch",
+            leave=False,
+            disable=x.shape[0] == 1 or ss.disable_status,
+        ):
+            bidx = batch - 1
+            mcc = 0
             if self.de_batch_channels:
                 y_flat = x[bidx].flatten(start_dim=1)
             else:
@@ -1997,7 +2030,7 @@ class DiffraxStep(DESolverStep):
                     if interrupted is not None:
                         raise interrupted
                     raise
-            results.append(self.j2t(solution.ys).view(*x.shape))
+            results.append(self.j2t(solution.ys).view(1, *x.shape[1:]))
             del solution
         result = torch.cat(results).to(x)
         sigma_up, result = yield from self.adjusted_step(ss, sn, result, mcc, sigma_up)
