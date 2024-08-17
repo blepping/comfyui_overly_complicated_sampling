@@ -32,6 +32,7 @@ class MergeSubstepsSampler:
         post_filter = options.pop("post_filter", None)
         self.pre_filter = None if pre_filter is None else make_filter(pre_filter)
         self.post_filter = None if post_filter is None else make_filter(post_filter)
+        self.preview_mode = options.pop("preview_mode", "denoised")
         self.options = options
 
     def check_match(self, handlers: None | object, *, ss: None | object = None):
@@ -98,6 +99,11 @@ class MergeSubstepsSampler:
     def reset(self):
         pass
 
+    def callback(self, *, ss=None, mr=None, preview_mode=None):
+        ss = fallback(ss, self.ss)
+        preview_mode = fallback(preview_mode, self.preview_mode)
+        return ss.callback(hi=mr, preview_mode=preview_mode)
+
 
 class SimpleSubstepsSampler(MergeSubstepsSampler):
     name = "simple"
@@ -125,7 +131,7 @@ class SimpleSubstepsSampler(MergeSubstepsSampler):
         ssampler.noise_sampler = noise_sampler
         ss.hist.push(ss.model(x, ss.sigma, ss=ss))
         ss.refs = FilterRefs.from_ss(ss, have_current=True)
-        ss.callback()
+        self.callback()
         sr = self.simple_substep(x, ssampler)
         return self.merge_steps(sr.x, noise=sr.get_noise(ss=ss))
 
@@ -144,7 +150,7 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
         pbar = tqdm.tqdm(total=self.substeps, initial=1, disable=ss.disable_status)
         ss.hist.push(ss.model(x, ss.sigma, ss=ss))
         ss.refs = FilterRefs.from_ss(ss, have_current=True)
-        ss.callback()
+        self.callback()
         for ssampler in self.samplers:
             custom_noise = ssampler.options.get(
                 "custom_noise", self.options.get("custom_noise")
@@ -407,7 +413,7 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
                 subss.hist.push(subss.model(x, subss.sigma, ss=subss))
                 subss.refs = FilterRefs.from_ss(subss, have_current=True)
                 if substep == 0:
-                    subss.callback()
+                    self.callback(ss=subss)
                 sr = self.simple_substep(x, ssampler, ss=subss)
                 x = sr.x
                 noise_strength = sr.noise_scale
@@ -489,7 +495,7 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
                 subss.refs = FilterRefs.from_ss(subss, have_current=True)
                 if substep == 0:
                     ss.hist.push(subss.hcur)
-                    subss.callback()
+                    self.callback(ss=subss)
                 sr = self.simple_substep(x, ssampler, ss=subss)
                 x = sr.x
                 noise_strength = sr.noise_scale

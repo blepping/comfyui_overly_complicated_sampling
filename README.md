@@ -271,6 +271,13 @@ eta: 1.0
 # Reversible ETA (used for reversible samplers). May not do anything currently.
 reta: 1.0
 
+# Sets the type of preview used for sampling in this group. One of:
+#   denoised: The default, shows the model prediction (takes positive and negative prompt into account).
+#   cond: Shows the model cond prediction (basically the positive prompt).
+#   uncond: Shows the model uncond prediction (basically the negative prompt).
+#   raw: Shows the raw noisy latent input.
+preview_mode: denoised
+
 # Expression.
 when: null
 

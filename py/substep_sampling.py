@@ -4,6 +4,7 @@ from comfy.k_diffusion.sampling import get_ancestral_step
 
 from .filtering import FilterRefs
 from .model import History
+from .utils import fallback
 
 
 class Items:
@@ -191,16 +192,24 @@ class SamplerState:
         obj.update()
         return obj
 
-    def callback(self, hi=None):
+    def callback(self, hi=None, *, preview_mode="denoised"):
         if not self.callback_:
             return None
         hi = self.hcur if hi is None else hi
+        if preview_mode == "cond":
+            preview = fallback(hi.denoised_cond, hi.denoised)
+        elif preview_mode == "uncond":
+            preview = fallback(hi.uncond, hi.denoised)
+        elif preview_mode == "raw":
+            preview = hi.x
+        else:
+            preview = hi.denoised
         return self.callback_({
             "x": hi.x,
             "i": self.step,
             "sigma": hi.sigma,
             "sigma_hat": hi.sigma,
-            "denoised": hi.denoised,
+            "denoised": preview,
         })
 
     def reset(self):
