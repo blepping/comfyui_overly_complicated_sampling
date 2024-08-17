@@ -362,9 +362,9 @@ class NormalMergeSubstepsSampler(MergeSubstepsSampler):
 class DivideMergeSubstepsSampler(MergeSubstepsSampler):
     name = "divide"
 
-    def __init__(self, ss, group, *, schedule_multiplier=4, **kwargs):
+    def __init__(self, ss, group, **kwargs):
         super().__init__(ss, group, **kwargs)
-        self.schedule_multiplier = schedule_multiplier
+        self.schedule_multiplier = self.options.pop("schedule_multiplier", 4)
 
     def make_schedule(self, ss):
         max_steps = len(self.ss.sigmas) - 1
@@ -432,18 +432,14 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         self,
         ss,
         group,
-        *,
-        overshoot_expand_steps=1,
-        restart_custom_noise=None,
-        restart=None,
         **kwargs,
     ):
         super().__init__(ss, group, **kwargs)
-        self.overshoot_expand_steps = overshoot_expand_steps
-        restart = fallback(restart, {})
+        self.overshoot_expand_steps = self.options.pop("overshoot_expand_steps", 1)
+        restart = self.options.pop("restart", {})
         self.restart = Restart(
             s_noise=restart.get("s_noise", 1.0),
-            custom_noise=restart_custom_noise,
+            custom_noise=self.options.pop("restart_custom_noise", None),
             immiscible=restart.get("immiscible", False),
         )
 
