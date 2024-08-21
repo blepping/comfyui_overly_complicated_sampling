@@ -126,11 +126,11 @@ noise:
     batch_size: 32
 
     # Whether to cache noise.
-    caching: true
+    caching: false
 
     # Interval (in full steps) to reset the cache. Brownian noise takes time into account so
-    # if using Brownian you will generally want to reset each step.
-    cache_reset_interval: 1
+    # if using Brownian with caching enabled you will generally want to reset each step.
+    cache_reset_interval: 9999
 
     # Immiscible noise processing, see: https://arxiv.org/abs/2406.12303
     immiscible:

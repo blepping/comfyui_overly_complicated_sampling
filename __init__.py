@@ -1,5 +1,5 @@
 from .py import nodes
-
+from .py import custom_noise
 
 NODE_CLASS_MAPPINGS = {
     "OCS Sampler": nodes.SamplerNode,
@@ -9,5 +9,5 @@ NODE_CLASS_MAPPINGS = {
     "OCS MultiParam": nodes.MultiParamNode,
     "OCS ModelSetMaxSigma": nodes.ModelSetMaxSigmaNode,
     "OCS SimpleRestartSchedule": nodes.SimpleRestartSchedule,
-}
+} | custom_noise.NODE_CLASS_MAPPINGS
 __all__ = ["NODE_CLASS_MAPPINGS"]
