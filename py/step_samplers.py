@@ -376,6 +376,7 @@ class MinSigmaStepMixin:
 class EulerStep(SingleStepSampler):
     name = "euler"
     allow_cfgpp = True
+    allow_alt_cfgpp = True
     step = SingleStepSampler.euler_step
 
 
