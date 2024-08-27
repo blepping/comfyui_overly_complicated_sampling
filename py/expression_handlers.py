@@ -102,9 +102,11 @@ class FlipHandler(NormHandler):
             return torch.flip(tensor, (dim,))
         result = tensor.detach().clone()
         pivot = tensor.shape[dim] // 2
-        out_slice = [np.s_[:] if d != dim else np.s_[pivot:] for d in range(tensor.ndim)]
-        in_slice = [np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim)]
-        result[tuple(out_slice)] = torch.flip(tensor[tuple(in_slice)], dims=(dim,))
+        out_slice = tuple(
+            np.s_[:] if d != dim else np.s_[pivot:] for d in range(tensor.ndim)
+        )
+        in_slice = tuple(np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim))
+        result[out_slice] = torch.flip(tensor[in_slice], dims=(dim,))
         return result
 
 
