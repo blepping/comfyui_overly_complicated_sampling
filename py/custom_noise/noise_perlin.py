@@ -15,9 +15,10 @@ def smoothstep_function(t):
 
 
 class DEFAULTS:
+    depth = 16
     res = ((1,), (1,), (1,))
-    octaves = 1
-    persistence = (0.5,)
+    octaves = 2
+    persistence = (1.0,)
     lacunarity = ((2,), (2,), (2,))
     initial_amplitude = 1.0
     initial_frequency = (1.0, 1.0, 1.0)
@@ -25,12 +26,22 @@ class DEFAULTS:
     detail_level = 0.0
     tileable = (False, False, False)
     fade = smoothstep_function
-    blend = torch.lerp
-    pattern_break_blend = torch.lerp
+    blend = "lerp"
+    pattern_break_blend = "lerp"
     depth_over_channels = False
+    initial_depth = 0
+    wrap_depth = 0
+    max_depth = -1
     pad = (0, 0, 0)
     generator = None
-    device = "cpu"
+    device = "default"
+
+    @classmethod
+    def get_commasep(cls, key, idx=None):
+        val = getattr(cls, key)
+        if idx is not None:
+            val = val[idx]
+        return ", ".join(repr(v) for v in val)
 
 
 def rand_perlin(
@@ -39,7 +50,7 @@ def rand_perlin(
     *,
     tileable=DEFAULTS.tileable,
     fade=DEFAULTS.fade,
-    blend=DEFAULTS.blend,
+    blend=BLENDING_MODES[DEFAULTS.blend],
     generator=DEFAULTS.generator,
     device=DEFAULTS.device,
 ):
@@ -150,7 +161,7 @@ def generate_fractal_noise(
     initial_frequency=DEFAULTS.initial_frequency,
     tileable=DEFAULTS.tileable,
     fade=DEFAULTS.fade,
-    blend=DEFAULTS.blend,
+    blend=BLENDING_MODES[DEFAULTS.blend],
     generator=DEFAULTS.generator,
     device=DEFAULTS.device,
 ):
@@ -218,8 +229,8 @@ def create_noisy_latents_perlin(
     res=DEFAULTS.res,
     break_pattern=DEFAULTS.break_pattern,
     channels=4,
-    blend=torch.lerp,
-    pattern_break_blend=DEFAULTS.pattern_break_blend,
+    blend=BLENDING_MODES[DEFAULTS.blend],
+    pattern_break_blend=BLENDING_MODES[DEFAULTS.pattern_break_blend],
     depth_over_channels=DEFAULTS.depth_over_channels,
     pad=DEFAULTS.pad,
     initial_frequency=DEFAULTS.initial_frequency,
@@ -324,14 +335,14 @@ class PerlinItem(CustomNoiseItemBase):
         initial_frequency_height=DEFAULTS.initial_frequency[1],
         initial_frequency_width=DEFAULTS.initial_frequency[2],
         initial_frequency=None,
-        initial_amplitude=1.0,
-        wrap_depth=0,
-        initial_depth=0,
-        max_depth=-1,
-        break_pattern=1.0,
-        blend=torch.lerp,
-        pattern_break_blend=torch.lerp,
-        depth_over_channels=False,
+        initial_amplitude=DEFAULTS.initial_amplitude,
+        wrap_depth=DEFAULTS.wrap_depth,
+        initial_depth=DEFAULTS.initial_depth,
+        max_depth=DEFAULTS.max_depth,
+        break_pattern=DEFAULTS.break_pattern,
+        blend=DEFAULTS.blend,
+        pattern_break_blend=DEFAULTS.pattern_break_blend,
+        depth_over_channels=DEFAULTS.depth_over_channels,
         pad=None,
         pad_depth=DEFAULTS.pad[0],
         pad_height=DEFAULTS.pad[1],
@@ -474,6 +485,8 @@ class PerlinItem(CustomNoiseItemBase):
 
 
 class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
+    DESCRIPTION = "Advanced Perlin noise generator, allows generating 2D or 3D Perlin noise. See the OCSNoise PerlinSimple node for less tuneable parameters."
+
     @classmethod
     def INPUT_TYPES(cls):
         result = super().INPUT_TYPES()
@@ -481,119 +494,119 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
             "depth": (
                 "INT",
                 {
-                    "default": 16,
+                    "default": DEFAULTS.depth,
                     "tooltip": "When non-zero, 3D perlin noise will be generated.",
                 },
             ),
             "detail_level": (
                 "FLOAT",
                 {
-                    "default": 0.0,
+                    "default": DEFAULTS.detail_level,
                     "tooltip": "Controls the detail level of the noise when break_pattern is non-zero. No effect when using 100% raw Perlin noise.",
                 },
             ),
             "octaves": (
                 "INT",
                 {
-                    "default": 2,
+                    "default": DEFAULTS.octaves,
                     "tooltip": "Generally controls the detail level of the noise. Each octave involves generating a layer of noise so there is a performance cost to increasing octaves.",
                 },
             ),
             "persistence": (
                 "STRING",
                 {
-                    "default": "1.0",
+                    "default": DEFAULTS.get_commasep("persistence"),
                     "tooltip": "Controls how rough the generated noise is. Lower values will result in smoother noise, higher values will look more like Gaussian noise. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "lacunarity_height": (
                 "STRING",
                 {
-                    "default": "2",
+                    "default": DEFAULTS.get_commasep("lacunarity", 0),
                     "tooltip": "Lacunarity controls the frequency multiplier between successive octaves. Only has an effect when octaves is greater than one. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "lacunarity_width": (
                 "STRING",
                 {
-                    "default": "2",
+                    "default": DEFAULTS.get_commasep("lacunarity", 1),
                     "tooltip": "Lacunarity controls the frequency multiplier between successive octaves. Only has an effect when octaves is greater than one. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "lacunarity_depth": (
                 "STRING",
                 {
-                    "default": "2",
+                    "default": DEFAULTS.get_commasep("lacunarity", 2),
                     "tooltip": "Lacunarity controls the frequency multiplier between successive octaves. Only has an effect when depth is non-zero and octaves is greater than one. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "res_height": (
                 "STRING",
                 {
-                    "default": "1",
-                    "tooltip": "Number of periods of noise to generate along this axis. Comma-separated list, multiple items will apply to octaves in sequence.",
+                    "default": DEFAULTS.get_commasep("res", 0),
+                    "tooltip": "Number of periods of noise to generate along an axis. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "res_width": (
                 "STRING",
                 {
-                    "default": "1",
-                    "tooltip": "Number of periods of noise to generate along this axis. Comma-separated list, multiple items will apply to octaves in sequence.",
+                    "default": DEFAULTS.get_commasep("res", 1),
+                    "tooltip": "Number of periods of noise to generate along an axis. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "res_depth": (
                 "STRING",
                 {
-                    "default": "1",
-                    "tooltip": "Number of periods of noise to generate along this axis. Only has an effect when depth is non-zero. Comma-separated list, multiple items will apply to octaves in sequence.",
+                    "default": DEFAULTS.get_commasep("res", 2),
+                    "tooltip": "Number of periods of noise to generate along an axis. Only has an effect when depth is non-zero. Comma-separated list, multiple items will apply to octaves in sequence.",
                 },
             ),
             "break_pattern": (
                 "FLOAT",
                 {
-                    "default": 1.0,
-                    "tooltip": "Applies a function to break the Perlin pattern, making it more like normal noise. The value is the blend strength, where 1.0 indicates 100% pattern broken noise and 0.5 indicates 50% raw noise and 50% pattern broken noise. ",
+                    "default": DEFAULTS.break_pattern,
+                    "tooltip": "Applies a function to break the Perlin pattern, making it more like normal noise. The value is the blend strength, where 1.0 indicates 100% pattern broken noise and 0.5 indicates 50% raw noise and 50% pattern broken noise. Generally should be at least 0.9 unless you want to generate colorful blobs.",
                 },
             ),
             "initial_depth": (
                 "INT",
                 {
-                    "default": 0,
+                    "default": DEFAULTS.initial_depth,
                     "tooltip": "First zero-based depth index the noise generator will return. Only has an effect when depth is non-zero.",
                 },
             ),
             "wrap_depth": (
                 "INT",
                 {
-                    "default": 0,
+                    "default": DEFAULTS.wrap_depth,
                     "tooltip": "If non-zero, instead of generating a new chunk of noise when the last slice is used will instead jump back to the specified zero-based depth index. Only has an effect when depth is non-zero.",
                 },
             ),
             "max_depth": (
                 "INT",
                 {
-                    "default": -1,
+                    "default": DEFAULTS.max_depth,
                     "tooltip": "Basically crops the depth dimension to the specified value (inclusive). Negative values start from the end, the default of -1 does no cropping. Only has an effect when depth is non-zero.",
                 },
             ),
             "tileable_height": (
                 "BOOLEAN",
                 {
-                    "default": False,
+                    "default": DEFAULTS.tileable[0],
                     "tooltip": "Makes the specified dimension tileable.",
                 },
             ),
             "tileable_width": (
                 "BOOLEAN",
                 {
-                    "default": False,
+                    "default": DEFAULTS.tileable[1],
                     "tooltip": "Makes the specified dimension tileable.",
                 },
             ),
             "tileable_depth": (
                 "BOOLEAN",
                 {
-                    "default": False,
+                    "default": DEFAULTS.tileable[2],
                     "tooltip": "Makes the specified dimension tileable. Only has an effect when depth is non-zero.",
                 },
             ),
@@ -614,14 +627,14 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
             "depth_over_channels": (
                 "BOOLEAN",
                 {
-                    "default": False,
+                    "default": DEFAULTS.depth_over_channels,
                     "tooltip": "When disabled, each channel will have its own separate 3D noise pattern. When enabled, depth is multiplied by the number of channels and each channel is a slice of depth. Only has an effect when depth is non-zero.",
                 },
             ),
             "pad_height": (
                 "INT",
                 {
-                    "default": 0,
+                    "default": DEFAULTS.pad[0],
                     "min": 0,
                     "tooltip": "Pads the specified dimension by the size. Equal padding will be added on both sides and cropped out after generation.",
                 },
@@ -629,7 +642,7 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
             "pad_width": (
                 "INT",
                 {
-                    "default": 0,
+                    "default": DEFAULTS.pad[1],
                     "min": 0,
                     "tooltip": "Pads the specified dimension by the size. Equal padding will be added on both sides and cropped out after generation.",
                 },
@@ -637,7 +650,7 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
             "pad_depth": (
                 "INT",
                 {
-                    "default": 0,
+                    "default": DEFAULTS.pad[2],
                     "min": 0,
                     "tooltip": "Pads the specified dimension by the size. Equal padding will be added on both sides and cropped out after generation. Only has an effect when depth is non-zero.",
                 },
@@ -645,28 +658,28 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
             "initial_amplitude": (
                 "FLOAT",
                 {
-                    "default": 1.0,
+                    "default": DEFAULTS.initial_amplitude,
                     "tooltip": "Controls the amplitude for the first octave.",
                 },
             ),
             "initial_frequency_height": (
                 "FLOAT",
                 {
-                    "default": 1.0,
+                    "default": DEFAULTS.initial_frequency[0],
                     "tooltip": "Controls the frequency for the first octave for the this axis.",
                 },
             ),
             "initial_frequency_width": (
                 "FLOAT",
                 {
-                    "default": 1.0,
+                    "default": DEFAULTS.initial_frequency[1],
                     "tooltip": "Controls the frequency for the first octave for the this axis.",
                 },
             ),
             "initial_frequency_depth": (
                 "FLOAT",
                 {
-                    "default": 1.0,
+                    "default": DEFAULTS.initial_frequency[2],
                     "tooltip": "Controls the frequency for the first octave for the this axis.",
                 },
             ),
@@ -680,11 +693,52 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 ("default", "cpu", "gpu"),
                 {
                     "default": "default",
-                    "tooltip": "Controls what device is used to generate the noise.",
+                    "tooltip": "Controls what device is used to generate the noise. GPU noise may be slightly faster but you will get different results on different GPUs.",
                 },
             ),
         }
         return result
 
-    def get_item_class(self):
+    @classmethod
+    def get_item_class(cls):
         return PerlinItem
+
+
+class PerlinSimpleNode(PerlinAdvancedNode):
+    DESCRIPTION = "Simplified Perlin noise generator, allows generating 2D or 3D Perlin noise. See the OCSNoise PerlinAdvanced node for more tuneable parameters."
+
+    _COPY_KEYS = {
+        "factor",
+        "rescale",
+        "depth",
+        "detail_level",
+        "octaves",
+        "persistence",
+        "break_pattern",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        result = super().INPUT_TYPES()
+        orig_reqs = result["required"]
+        reqs = {k: v for k, v in orig_reqs.items() if k in cls._COPY_KEYS}
+        reqs["lacunarity"] = orig_reqs["lacunarity_height"]
+        reqs["res"] = orig_reqs["res_height"]
+        result["required"] = reqs
+        return result
+
+    @classmethod
+    def get_item_class(cls):
+        def wrapper(factor, *, lacunarity, res, **kwargs):
+            return PerlinItem(
+                factor,
+                lacunarity_height=lacunarity,
+                lacunarity_width=lacunarity,
+                lacunarity_depth=lacunarity,
+                res_height=res,
+                res_width=res,
+                res_depth=res,
+                **kwargs,
+            )
+
+        return wrapper

@@ -211,6 +211,8 @@ noise:
 
 Then the rest of the parameters will use the defaults shown above.
 
+***
+
 ### `OCS Group`
 
 Defines a group of substeps.
@@ -299,6 +301,8 @@ post_filter: null
 ```
 
 </details>
+
+***
 
 ### `OCS Substeps`
 
@@ -599,3 +603,76 @@ The example above means:
 3. Go to the second item (after 2 steps, jump back one step).
 
 The node `start_step` parameter is effectively the same as `[start_step, 0]` as a schedule item.
+
+***
+
+### `OCSNoise to SONAR_CUSTOM_NOISE`
+
+Adapter that enables using OCS noise generators with nodes that accept `SONAR_CUSTOM_NOISE`.
+
+Most built-in OCS nodes will accept either type currently.
+
+***
+
+### `OCSNoise PerlinSimple`
+
+Generates 2D or 3D Perlin noise with many tuneable parameters. Can be plugged in to samplers for ancestral or SDE sampling. For initial noise or img2img workflows, use the `NoisyLatentLike` node from `ComfyUI-sonar` (see [Integration](#integration)).
+
+3D Perlin noise works by taking a slice in the depth dimension each time the noise sampler is called.
+
+For more tuneable parameters, see the `OCSNoise PerlinAdvanced` node.
+
+**Note**: The shape of the latent must be a multiple of `lacunarity ** (octaves - 1) * res` (`**` indicates raising something to a power). Most latent types will have one latent pixel equaling eight normal pixels - i.e. if your image is 512x512, the latent would be 64x64.
+
+#### Node Parameters
+
+* `depth`: When non-zero, 3D perlin noise will be generated.
+* `detail_level`: Controls the detail level of the noise when `break_pattern` is non-zero. No effect when using 100% raw Perlin noise.
+* `octaves`: Generally controls the detail level of the noise. Each octave involves generating a layer of noise so there is a performance cost to increasing octaves.
+* `persistence`: Controls how rough the generated noise is. Lower values will result in smoother noise, higher values will look more like Gaussian noise. Comma-separated list, multiple items will apply to octaves in sequence.
+* `lacunarity`: Lacunarity controls the frequency multiplier between successive octaves. Only has an effect when octaves is greater than one. Comma-separated list, multiple items will apply to octaves in sequence.
+* `res_height`: Number of periods of noise to generate along an axis. Comma-separated list, multiple items will apply to octaves in sequence.
+* `break_pattern`: Applies a function to break the Perlin pattern, making it more like normal noise. The value is the blend strength, where 1.0 indicates 100% pattern broken noise and 0.5 indicates 50% raw noise and 50% pattern broken noise. Generally should be at least 0.9 unless you want to generate colorful blobs.
+
+
+***
+
+### `OCSNoise PerlinAdvanced`
+
+Generates 2D or 3D Perlin noise with many tuneable parameters. Can be plugged in to samplers for ancestral or SDE sampling. For initial noise or img2img workflows, use the `NoisyLatentLike` node from `ComfyUI-sonar` (see [Integration](#integration)).
+
+3D Perlin noise works by taking a slice in the depth dimension each time the noise sampler is called.
+
+**Note**: The shape of the latent in the relevant dimension _including padding_ must be a multiple of `lacunarity ** (octaves - 1) * res`. Most latent types will have one latent pixel equaling eight normal pixels - i.e. if your image is 512x512, the latent would be 64x64.
+
+#### Node Parameters
+
+* `depth`: When non-zero, 3D perlin noise will be generated.
+* `detail_level`: Controls the detail level of the noise when `break_pattern` is non-zero. No effect when using 100% raw Perlin noise.
+* `octaves`: Generally controls the detail level of the noise. Each octave involves generating a layer of noise so there is a performance cost to increasing octaves.
+* `persistence`: Controls how rough the generated noise is. Lower values will result in smoother noise, higher values will look more like Gaussian noise. Comma-separated list, multiple items will apply to octaves in sequence.
+* `lacunarity_height`: Lacunarity controls the frequency multiplier between successive octaves. Only has an effect when octaves is greater than one. Comma-separated list, multiple items will apply to octaves in sequence.
+* `lacunarity_width`: " "
+* `lacunarity_depth`: " "
+* `res_height`: Number of periods of noise to generate along an axis. Comma-separated list, multiple items will apply to octaves in sequence.
+* `res_width`: " "
+* `res_depth`: " "
+* `break_pattern`: Applies a function to break the Perlin pattern, making it more like normal noise. The value is the blend strength, where 1.0 indicates 100% pattern broken noise and 0.5 indicates 50% raw noise and 50% pattern broken noise. Generally should be at least 0.9 unless you want to generate colorful blobs.
+* `initial_depth`: First zero-based depth index the noise generator will return. Only has an effect when depth is non-zero.
+* `wrap_depth`: If non-zero, instead of generating a new chunk of noise when the last slice is used will instead jump back to the specified zero-based depth index. Only has an effect when depth is non-zero. Since this is repeating the same noise, you may need to reduce `s_noise` in samplers especially if your `depth` value is low.
+* `max_depth`: Basically crops the depth dimension to the specified value (inclusive). Negative values start from the end, the default of -1 does no cropping. Only has an effect when depth is non-zero. The reason you might want to use this is changing `depth` will also effectively change the seed.
+* `tileable_height`: Makes the specified dimension tileable. (May or may not work correctly.)
+* `tileable_width`: " "
+* `tileable_depth`: " "
+* `blend`: Blending function used when generating Perlin noise. When set to values other than LERP may not work at all or may not actually generate Perlin noise. If you have `ComfyUI-bleh` there will be many more blending options (see [Integration](#integration)).
+* `pattern_break_blend`: Blending function used to blend pattern broken noise with raw noise. If you have `ComfyUI-bleh` there will be many more blending options (see [Integration](#integration)).
+* `depth_over_channels`: When disabled, each channel will have its own separate 3D noise pattern. When enabled, depth is multiplied by the number of channels and each channel is a slice of depth. Only has an effect when depth is non-zero.
+* `pad_height`: Pads the specified dimension by the size. Equal padding will be added on both sides and cropped out after generation.
+* `pad_width`: " "
+* `pad_depth`: " "
+* `initial_amplitude`: Controls the amplitude for the first octave. The amplitude gets multiplied by `persistence` after each octave.
+* `initial_frequency_height`: Controls the frequency for the first octave for the this axis. The frequency gets multiplied by `lacunarity` after each octave.
+* `initial_frequency_width`: " "
+* `initial_frequency_depth`: " "
+* `normalize`: Controls whether the output noise is normalized after generation.
+* `device`: Controls what device is used to generate the noise. GPU noise may be slightly faster but you will get different results on different GPUs.
