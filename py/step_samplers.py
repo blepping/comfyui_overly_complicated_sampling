@@ -670,6 +670,7 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
 class RESStep(SingleStepSampler):
     name = "res"
     model_calls = 1
+    allow_alt_cfgpp = True  # May not be implemented correctly.
 
     def __init__(self, *, res_simple_phi=False, res_c2=0.5, **kwargs):
         super().__init__(**kwargs)
@@ -690,13 +691,18 @@ class RESStep(SingleStepSampler):
 
         c2_h = 0.5 * h
 
-        x_2 = math.exp(-c2_h) * x + a2_1 * h * denoised
+        eff_x = (
+            x
+            if self.alt_cfgpp_scale == 0 or ss.hcur.denoised_uncond is None
+            else x + (ss.denoised - ss.hcur.denoised_uncond) * self.alt_cfgpp_scale
+        )
+        x_2 = math.exp(-c2_h) * eff_x + a2_1 * h * denoised
         lam_2 = lam + c2_h
         sigma_2 = lam_2.neg().exp()
 
         denoised2 = ss.model(x_2, sigma_2, ss=ss, call_index=1).denoised
 
-        x = math.exp(-h) * x + h * (b1 * denoised + b2 * denoised2)
+        x = math.exp(-h) * eff_x + h * (b1 * denoised + b2 * denoised2)
         yield from self.result(ss, x, sigma_up)
 
 
@@ -1045,9 +1051,11 @@ class EulerDancingStep(SingleStepSampler):
     #     return result, noise_scale
 
 
+# Alt CFG++ approach referenced from https://github.com/comfyanonymous/ComfyUI/pull/3871 - thanks!
 class DPMPP2SStep(SingleStepSampler, DPMPPStepMixin):
     name = "dpmpp_2s"
     model_calls = 1
+    allow_alt_cfgpp = True
 
     def step(self, x, ss):
         t_fn, sigma_fn = self.t_fn, self.sigma_fn
@@ -1057,9 +1065,14 @@ class DPMPP2SStep(SingleStepSampler, DPMPPStepMixin):
         r = 1 / 2
         h = t_next - t
         s = t + r * h
-        x_2 = (sigma_fn(s) / sigma_fn(t)) * x - (-h * r).expm1() * ss.denoised
+        eff_x = (
+            x
+            if self.alt_cfgpp_scale == 0 or ss.hcur.denoised_uncond is None
+            else x + (ss.denoised - ss.hcur.denoised_uncond) * self.alt_cfgpp_scale
+        )
+        x_2 = (sigma_fn(s) / sigma_fn(t)) * eff_x - (-h * r).expm1() * ss.denoised
         denoised_2 = ss.model(x_2, sigma_fn(s), ss=ss, call_index=1).denoised
-        x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_2
+        x = (sigma_fn(t_next) / sigma_fn(t)) * eff_x - (-h).expm1() * denoised_2
         yield from self.result(ss, x, sigma_up)
 
 
@@ -1067,6 +1080,7 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
     name = "dpmpp_sde"
     self_noise = 1
     model_calls = 1
+    allow_alt_cfgpp = True  # Implementation may not be correct.
 
     def __init__(self, *args, r=1 / 2, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1084,7 +1098,12 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
         # Step 1
         sd, su = get_ancestral_step(sigma_fn(t), sigma_fn(s), eta)
         s_ = t_fn(sd)
-        x_2 = (sigma_fn(s_) / sigma_fn(t)) * x - (t - s_).expm1() * ss.denoised
+        eff_x = (
+            x
+            if self.alt_cfgpp_scale == 0 or ss.hcur.denoised_uncond is None
+            else x + (ss.denoised - ss.hcur.denoised_uncond) * self.alt_cfgpp_scale
+        )
+        x_2 = (sigma_fn(s_) / sigma_fn(t)) * eff_x - (t - s_).expm1() * ss.denoised
         x_2 = yield from self.result(
             ss, x_2, su, sigma=sigma_fn(t), sigma_next=sigma_fn(s), final=False
         )
@@ -1094,7 +1113,9 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
         sd, su = get_ancestral_step(sigma_fn(t), sigma_fn(t_next), eta)
         t_next_ = t_fn(sd)
         denoised_d = (1 - fac) * ss.denoised + fac * denoised_2
-        x = (sigma_fn(t_next_) / sigma_fn(t)) * x - (t - t_next_).expm1() * denoised_d
+        x = (sigma_fn(t_next_) / sigma_fn(t)) * eff_x - (
+            t - t_next_
+        ).expm1() * denoised_d
         yield from self.result(ss, x, su)
 
 
