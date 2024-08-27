@@ -178,7 +178,7 @@ class EqHandler(BinopLogicHandler):
         return a1 == a2
 
 
-class NeqHandler(BinopLogicHandler):
+class NeqHandler(EqHandler):
     def handle(self, *args, **kwargs):
         return not super().handle(*args, **kwargs)
 
