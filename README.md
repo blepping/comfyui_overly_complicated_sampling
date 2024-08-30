@@ -123,10 +123,10 @@ noise:
 
     # When caching, the batch size for chunks of noise to generate in advance. Generating a batch of noise
     # can be more efficient than generating on demand when using a high number of substeps (>10) per step.
-    batch_size: 32
+    batch_size: 1
 
     # Whether to cache noise.
-    caching: false
+    caching: true
 
     # Interval (in full steps) to reset the cache. Brownian noise takes time into account so
     # if using Brownian with caching enabled you will generally want to reset each step.
