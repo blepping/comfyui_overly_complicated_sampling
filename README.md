@@ -634,7 +634,6 @@ For more tuneable parameters, see the `OCSNoise PerlinAdvanced` node.
 * `res_height`: Number of periods of noise to generate along an axis. Comma-separated list, multiple items will apply to octaves in sequence.
 * `break_pattern`: Applies a function to break the Perlin pattern, making it more like normal noise. The value is the blend strength, where 1.0 indicates 100% pattern broken noise and 0.5 indicates 50% raw noise and 50% pattern broken noise. Generally should be at least 0.9 unless you want to generate colorful blobs.
 
-
 ***
 
 ### `OCSNoise PerlinAdvanced`

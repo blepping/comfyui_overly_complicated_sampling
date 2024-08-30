@@ -2,7 +2,7 @@ import torch
 from tqdm.auto import trange
 
 
-from .filtering import FILTER_HANDLERS
+from .filtering import FILTER_HANDLERS, FilterRefs
 from .model import ModelCallCache
 from .noise import NoiseSamplerCache
 from .substep_sampling import SamplerState
@@ -87,6 +87,10 @@ def composable_sampler(
     restart_snoise = copts.get("restart_s_noise", 1.0)
     with trange(step_count, disable=ss.disable_status) as pbar:
         for noise_scale, chunk_sigmas in sigma_chunks:
+            if step != 0 and noise_scale != 0:
+                prev_refs = FilterRefs({
+                    f"pre_restart_{k}": v for k, v in ss.refs.items()
+                })
             ss.sigmas = chunk_sigmas
             ss.update(0, step=step, substep=0)
             if step != 0:
@@ -99,10 +103,11 @@ def composable_sampler(
             if step != 0 and noise_scale != 0:
                 restart_ns = restart.get_noise_sampler(nsc)
                 x += nsc.scale_noise(
-                    restart_ns(refs=ss.refs),
+                    restart_ns(refs=prev_refs | ss.refs),
                     noise_scale * restart_snoise,
                 )
                 del restart_ns
+                del prev_refs
             for idx in range(len(chunk_sigmas) - 1):
                 if idx > 0:
                     ss.update(idx, step=step, substep=0)

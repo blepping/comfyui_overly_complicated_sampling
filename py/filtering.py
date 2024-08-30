@@ -71,6 +71,9 @@ class FilterRefs:
     def __iter__(self):
         return self.kvs.__iter__()
 
+    def items(self):
+        return self.kvs.items()
+
     @classmethod
     def from_ss(cls, ss, *, have_current=False):
         ms = ss.model.model_sampling
