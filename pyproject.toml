@@ -1,0 +1,14 @@
+[project]
+name = "comfyui_overly_complicated_sampling"
+description = "Experimental and mathematically unsound (but fun!) sampling for ComfyUI.\nFeel free create a question in Discussions for usage help: OCS Q&A Discussion[w/Status: In flux, may be useful but likely to change/break workflows frequently. Mainly for advanced users.]"
+version = "1.0.0"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/blepping/comfyui_overly_complicated_sampling"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "comfyui_overly_complicated_sampling"
+Icon = ""
