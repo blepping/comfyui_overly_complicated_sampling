@@ -202,6 +202,16 @@ class SamplerState:
             preview = fallback(hi.denoised_uncond, hi.denoised)
         elif preview_mode == "raw":
             preview = hi.x
+        elif (
+            preview_mode == "diff"
+            and hi.denoised_uncond is not None
+            and hi.denoised_cond is not None
+        ):
+            preview = (
+                hi.denoised_uncond * 0.25 + (hi.denoised_uncond - hi.denoised_cond) * 16
+            )
+        elif preview_mode == "noisy":
+            preview = (hi.x - hi.denoised) * 0.1 + hi.denoised
         else:
             preview = hi.denoised
         return self.callback_({

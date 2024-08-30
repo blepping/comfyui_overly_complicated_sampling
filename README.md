@@ -278,6 +278,8 @@ reta: 1.0
 #   cond: Shows the model cond prediction (basically the positive prompt).
 #   uncond: Shows the model uncond prediction (basically the negative prompt).
 #   raw: Shows the raw noisy latent input.
+#   noisy: 10% of the noise + denoised.
+#   diff: Multiplies the difference between cond and uncond.
 preview_mode: denoised
 
 # Expression.
