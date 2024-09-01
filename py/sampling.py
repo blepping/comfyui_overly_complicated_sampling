@@ -63,8 +63,8 @@ def composable_sampler(
         extra_args,
         noise_sampler=noise_sampler,
         callback=callback,
-        eta=eta if eta != 1.0 else copts["eta"],
-        s_noise=s_noise if s_noise != 1.0 else copts["s_noise"],
+        eta=eta if eta != 1.0 else copts.get("eta", 1.0),
+        s_noise=s_noise if s_noise != 1.0 else copts.get("s_noise", 1.0),
         reta=copts.get("reta", 1.0),
         disable_status=disable,
     )
