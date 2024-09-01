@@ -179,6 +179,11 @@ noise:
 # Model calls can be cached. This is very experimental: I don't recommend using it
 # unless you know what you're doing.
 model:
+    # When enabled, skips generating uncond when you have CFG set to 1. Disabled by
+    # default as stuff like CFG++ won't work without uncond. Useful to enable for
+    # models like Flux that don't actually use CFG.
+    cfg1_uncond_optimization: false
+
     cache:
         # The cache size.
         size: 0

@@ -110,6 +110,7 @@ class ModelCallCache:
         *,
         cache=None,
         filter=None,
+        cfg1_uncond_optimization=False,
     ):
         self.cache = ModelCallCacheConfig(**fallback(cache, {}))
         filtargs = fallback(filter, {}).copy()
@@ -122,6 +123,7 @@ class ModelCallCache:
         self.model = model
         self.s_in = s_in
         self.extra_args = extra_args
+        self.cfg1_uncond_optimization = cfg1_uncond_optimization
         if self.cache.size < 1:
             return
         self.reset_cache()
@@ -221,11 +223,15 @@ class ModelCallCache:
             nonlocal denoised_cond, denoised_uncond
             denoised_uncond = args["uncond_denoised"]
             denoised_cond = args["cond_denoised"]
+            if denoised_uncond is None:
+                denoised_uncond = denoised_cond
             return args["denoised"]
 
         extra_args = self.extra_args | {
             "model_options": comfy.model_patcher.set_model_options_post_cfg_function(
-                model_options, postcfg, disable_cfg1_optimization=True
+                model_options,
+                postcfg,
+                disable_cfg1_optimization=not self.cfg1_uncond_optimization,
             )
         }
         s_in = fallback(s_in, self.s_in)
