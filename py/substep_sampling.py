@@ -175,15 +175,37 @@ class SamplerState:
         self.refs = FilterRefs.from_ss(self)
 
     def get_ancestral_step(self, eta=1.0, sigma=None, sigma_next=None):
-        sigma = self.sigma if sigma is None else sigma
-        sigma_next = self.sigma_next if sigma_next is None else sigma_next
+        if self.model.is_rectified_flow:
+            return self.get_ancestral_step_rf(
+                eta=eta, sigma=sigma, sigma_next=sigma_next
+            )
+        sigma = fallback(sigma, self.sigma)
+        sigma_next = fallback(sigma_next, self.sigma_next)
+        if eta == 0 or sigma_next <= 0:
+            return sigma_next, sigma_next.new_zeros(1)
         sd, su = (
             v if isinstance(v, torch.Tensor) else sigma.new_full((1,), v)
             for v in get_ancestral_step(
                 sigma, sigma_next, eta=eta if sigma_next != 0 else 0
             )
         )
+        if not (sd > 0 and su > 0):
+            return sigma_next, sigma_next.new_zeros(1)
         return sd, su
+
+    # Referenced from Comfy dpmpp_2s_ancestral_RF
+    def get_ancestral_step_rf(self, eta=1.0, sigma=None, sigma_next=None):
+        sigma = fallback(sigma, self.sigma)
+        sigma_next = fallback(sigma_next, self.sigma_next)
+        if eta == 0 or sigma_next <= 0:
+            return sigma_next, sigma_next.new_zeros(1)
+        sigma_down = sigma_next * (1 + (sigma_next / sigma - 1) * eta)
+        alpha_ip1, alpha_down = 1 - sigma_next, 1 - sigma_down
+        sigma_up = (sigma_next**2 - sigma_down**2 * alpha_ip1**2 / alpha_down**2) ** 0.5
+        if not (sigma_down > 0 and sigma_up > 0):
+            return sigma_next, sigma_next.new_zeros(1)
+        # print(f"\nRF ancestral: down={sigma_down}, up={sigma_up}")
+        return sigma_down, sigma_up
 
     def clone_edit(self, **kwargs):
         obj = self.__class__.__new__(self.__class__)

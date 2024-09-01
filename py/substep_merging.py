@@ -133,7 +133,7 @@ class SimpleSubstepsSampler(MergeSubstepsSampler):
         ss.refs = FilterRefs.from_ss(ss, have_current=True)
         self.callback()
         sr = self.simple_substep(x, ssampler)
-        return self.merge_steps(sr.x, noise=sr.get_noise(ss=ss))
+        return self.merge_steps(sr.noise_x(ss=ss))
 
 
 class NormalMergeSubstepsSampler(MergeSubstepsSampler):

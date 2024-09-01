@@ -124,6 +124,9 @@ class ModelCallCache:
         self.s_in = s_in
         self.extra_args = extra_args
         self.cfg1_uncond_optimization = cfg1_uncond_optimization
+        self.is_rectified_flow = x.shape[1] == 16 and isinstance(
+            model.inner_model.inner_model.model_sampling, comfy.model_sampling.CONST
+        )
         if self.cache.size < 1:
             return
         self.reset_cache()

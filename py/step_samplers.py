@@ -77,6 +77,7 @@ class SamplerResult:
         noise_sampler=None,
         final=True,
     ):
+        self.is_rectified_flow = ss.model.is_rectified_flow
         self.sampler = sampler
         self.sigma_up = fallback(sigma_up, ss.sigma.new_zeros(1))
         self.s_noise = fallback(s_noise, sampler.s_noise)
@@ -130,8 +131,12 @@ class SamplerResult:
         x = fallback(x, self.x)
         if self.sigma_next == 0 or self.noise_scale == 0:
             return x
-        x = x + self.get_noise(ss=ss) * scale
-        return x
+        noise = self.get_noise(ss=ss) * scale
+        if not self.is_rectified_flow:
+            return x + noise
+        x_coeff = (1 - self.sigma_next) / (1 - self.sigma_down)
+        # print(f"\nRF noise: {x_coeff}")
+        return x_coeff * x + noise
 
     def clone(self):
         obj = self.__new__(self.__class__)
@@ -230,7 +235,14 @@ class SingleStepSampler(CFGPPStepMixin):
     def euler_step(self, x, ss):
         sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
         d = self.to_d(ss.hcur)
-        return (yield from self.result(ss, ss.denoised + d * sigma_down, sigma_up))
+        return (
+            yield from self.result(
+                ss,
+                ss.denoised + d * sigma_down,
+                sigma_up,
+                sigma_down=sigma_down,
+            )
+        )
 
     def denoised_result(self, ss, **kwargs):
         return (
@@ -538,7 +550,7 @@ class ReversibleHeunStep(ReversibleSingleStepSampler):
             + (sigma_down * (d + d_next) / 2)
             - correction * reversible_scale
         )
-        yield from self.result(ss, x, sigma_up)
+        yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
 
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
@@ -583,7 +595,7 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
         # Update the sample using the Reversible Heun formula
         correction = dtr**2 * (d_next - d_prev) / 4
         x = x + (dt * (d_prev + d_next) / 2) - correction * reversible_scale
-        yield from self.result(ss, x, su)
+        yield from self.result(ss, x, su, sigma_down=sd)
 
     # def __step(self, x, ss):
     #     if ss.sigma_next == 0:
@@ -703,7 +715,7 @@ class RESStep(SingleStepSampler):
         denoised2 = ss.model(x_2, sigma_2, ss=ss, call_index=1).denoised
 
         x = math.exp(-h) * eff_x + h * (b1 * denoised + b2 * denoised2)
-        yield from self.result(ss, x, sigma_up)
+        yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
 
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
@@ -730,7 +742,7 @@ class TrapezoidalStep(SingleStepSampler):
 
         # Update the sample using the Trapezoidal rule
         x = x + dt_2 * (d_i + d_next) / 2
-        yield from self.result(ss, x, sigma_up)
+        yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
 
 
 class TrapezoidalCycleStep(CycleSingleStepSampler):
@@ -795,7 +807,7 @@ class BogackiStep(ReversibleSingleStepSampler):
 
         # Update the sample
         x = (x + 2 * k1 / 9 + k2 / 3 + 4 * k3 / 9) - correction * reversible_scale
-        yield from self.result(ss, x, su)
+        yield from self.result(ss, x, su, sigma_down=sd)
 
 
 class ReversibleBogackiStep(BogackiStep):
@@ -824,7 +836,7 @@ class RK4Step(SingleStepSampler):
 
         # Update the sample
         x = x + (k1 + 2 * k2 + 2 * k3 + k4) / 6
-        yield from self.result(ss, x, sigma_up)
+        yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
 
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
@@ -895,7 +907,7 @@ class EulerDancingStep(SingleStepSampler):
         d_2 = to_d(x, sigma_leap, ss.denoised)
         dt_2 = sigma_down2 - sigma_leap
         x = x + d_2 * dt_2
-        yield from self.result(ss, x, sigma_up2)
+        yield from self.result(ss, x, sigma_up2, sigma_down=sigma_down2)
 
     def _step(self, x, ss):
         eta = self.get_dyn_eta(ss)
@@ -1073,7 +1085,7 @@ class DPMPP2SStep(SingleStepSampler, DPMPPStepMixin):
         x_2 = (sigma_fn(s) / sigma_fn(t)) * eff_x - (-h * r).expm1() * ss.denoised
         denoised_2 = ss.model(x_2, sigma_fn(s), ss=ss, call_index=1).denoised
         x = (sigma_fn(t_next) / sigma_fn(t)) * eff_x - (-h).expm1() * denoised_2
-        yield from self.result(ss, x, sigma_up)
+        yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
 
 
 class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
@@ -1116,7 +1128,7 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
         x = (sigma_fn(t_next_) / sigma_fn(t)) * eff_x - (
             t - t_next_
         ).expm1() * denoised_d
-        yield from self.result(ss, x, su)
+        yield from self.result(ss, x, su, sigma_down=sd)
 
 
 # Based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
@@ -2084,7 +2096,7 @@ class HeunStep(ReversibleSingleStepSampler):
         result = hcur.denoised + d * s
         result += (dt * (d + d_next)) * 0.5
         result -= self.reversible_correction(ss, d, d_next)
-        yield from self.result(ss, result, su)
+        yield from self.result(ss, result, su, sigma_down=sd)
 
 
 class Heun1SStep(HeunStep):
@@ -2105,7 +2117,7 @@ class Heun1SStep(HeunStep):
         result = hcur.denoised + hcur.sigma * self.to_d(hcur)
         result += (dt * (d_prev + d)) * 0.5
         result -= self.reversible_correction(ss, d_prev, d)
-        yield from self.result(ss, result, su)
+        yield from self.result(ss, result, su, sigma_down=sd)
 
 
 class AdapterStep(SingleStepSampler):
