@@ -229,8 +229,9 @@ When running multiple substeps per step, the results will combined based on the 
 
 * `simple`: Doesn't merge anything: only runs a single substep per step.
 * `divide`: Creates a linear schedule between the current sigma and the next and runs the substeps in sequence. The model is called at least once per substep.
-* `normal`: The model is called at least once per step (and possibly additional times for higher order samplers). Each substep shares the first model call result. The results are averaged together. *Note*: Since the first model call is shared and the initial input is the same for each substep, there is no point in running multiple identical substeps. Also note: This merge strategy doesn't work well with non-ancestral samplers (i.e. dpmpp_2m or any sampler with `eta: 0`).
+* `supreme_avg`: The model is called at least once per step (and possibly additional times for higher order samplers). Each substep shares the first model call result. The results are averaged together. *Note*: Since the first model call is shared and the initial input is the same for each substep, there is no point in running multiple identical substeps. Also note: This merge strategy doesn't work well with non-ancestral samplers (i.e. dpmpp_2m or any sampler with `eta: 0`).
 * `overshoot`: The model is called at least once per step. It will sample steps equal to the number of substeps, starting from the current step. Then it will restart back to the expected step.
+* `lookahead`: Similar to `overshoot`, it samples ahead based on the number of substeps. The last model prediction is used to do a Euler step to the expected step. *Note:* Very experimental, likely to change in the future.
 <!--
 * `average`: The model is called once at the beginning of the step and substeps share that result (but it may be called additional times for higher order samplers). This means substeps for samplers like reversible Euler, Heun 1s, DPM++ 2m SDE are essentially free. May be theoretically very unsound and inaccurate, requires manual tweaking of settings like `s_noise`. Supports the parameter `avgmerge_stretch`(`0.4`) which basically rolls back the current sigma and adds some noise (otherwise running a substep is deterministic and there would be no point to running a sampler like Euler more than once).
 * `sample`: Like `average` (and uses `avgmerge_stretch`) but instead of simply using the average, it does a sampler step toward that instead. You can plug in any substep sampler to the `merge_sampler_opt` input (if unconnected and the merge method is `sample` then Euler will be used). *Note*: Substeps in the attached sampler will be ignored.
@@ -260,6 +261,7 @@ The left side group matches steps 0, 1, 2. The right side group matches all step
 -->
 
 * `restart_custom_noise`: Currently only used by the `overshoot` merge method.
+* `custom_noise`: Currently used by the `lookahead` merge method.
 
 #### Text Parameters
 
@@ -298,6 +300,21 @@ overshoot_expand_steps: 1
 restart:
     # Scales the noise added by restart sampling.
     s_noise: 1.0
+    # Immiscible block same as described above.
+    immiscible:
+        size: 0
+
+# Only used by the lookahead merge method currently.
+lookahead:
+    # Works like normal samplers, essentially. Disabled by default.
+    eta: 0.0
+
+    # Scales the noise added by lookahead sampling.
+    s_noise: 1.0
+
+    # Controls how much noise to remove in the prediction phase. Higher values will remove more noise.
+    dt_factor: 1.0
+
     # Immiscible block same as described above.
     immiscible:
         size: 0

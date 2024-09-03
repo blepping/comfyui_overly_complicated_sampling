@@ -4,9 +4,6 @@ import torch
 
 from comfy.k_diffusion.sampling import to_d
 
-from . import latent
-
-
 # def scale_noise_(
 #     noise,
 #     factor=1.0,

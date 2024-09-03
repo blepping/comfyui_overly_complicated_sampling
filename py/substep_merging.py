@@ -7,6 +7,7 @@ from . import expression as expr
 from . import utils
 
 from .filtering import make_filter, FilterRefs
+from .noise import ImmiscibleNoise
 from .restart import Restart
 from .step_samplers import STEP_SAMPLERS
 from .utils import check_time, fallback
@@ -136,8 +137,8 @@ class SimpleSubstepsSampler(MergeSubstepsSampler):
         return self.merge_steps(sr.noise_x(ss=ss))
 
 
-class NormalMergeSubstepsSampler(MergeSubstepsSampler):
-    name = "normal"
+class SupremeAvgMergeSubstepsSampler(MergeSubstepsSampler):
+    name = "supreme_avg"
 
     def step(self, x):
         ss = self.ss
@@ -514,13 +515,94 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         return x
 
 
+class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
+    name = "lookahead"
+
+    def __init__(self, ss, group, **kwargs):
+        super().__init__(ss, group, **kwargs)
+        lookahead = self.options.pop("lookahead", {})
+        self.lookahead_eta = lookahead.pop("eta", 0.0)
+        self.lookahead_s_noise = lookahead.pop("s_noise", 1.0)
+        self.lookahead_dt_factor = lookahead.pop("dt_factor", 1.0)
+        immiscible = lookahead.get("immiscible", False)
+        self.immiscible = (
+            ImmiscibleNoise(**immiscible) if immiscible is not False else False
+        )
+
+        self.custom_noise = self.options.get("custom_noise")
+
+    def step(self, x):
+        orig_x = x.clone()
+        ss = self.ss
+        subss = self.ss.clone_edit(idx=ss.idx, sigmas=ss.sigmas)
+        substep = 0
+        max_idx = len(ss.sigmas) - 1
+        eff_substeps = min(max_idx - ss.idx, self.substeps)
+        pbar = tqdm.tqdm(total=eff_substeps, initial=0, disable=ss.disable_status)
+        for ssampler in self.samplers:
+            substeps_remain = eff_substeps - substep
+            if substeps_remain == 0:
+                break
+            custom_noise = ssampler.options.get(
+                "custom_noise", self.options.get("custom_noise")
+            )
+            noise_sampler = ss.noise.make_caching_noise_sampler(
+                custom_noise,
+                ssampler.max_noise_samples(),
+                ss.sigma,
+                ss.sigma_next,
+                immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
+            )
+            ssampler.noise_sampler = noise_sampler
+            for subidx in range(min(substeps_remain, ssampler.substeps)):
+                subss.update(ss.idx + substep, substep=substep)
+                pbar.set_description(
+                    f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
+                )
+                subss.hist.push(subss.model(x, subss.sigma, ss=subss))
+                subss.refs = FilterRefs.from_ss(subss, have_current=True)
+                if substep == 0:
+                    self.callback(ss=subss)
+                sr = self.simple_substep(x, ssampler, ss=subss)
+                x = sr.x
+                noise_strength = sr.noise_scale
+                if noise_strength != 0 and subss.sigma_next != 0:
+                    x = sr.noise_x(ss=subss)
+                substep += 1
+                pbar.update(1)
+                if substeps_remain == 1:
+                    break
+        pbar.update(0)
+        sigma_down, sigma_up = ss.get_ancestral_step(
+            eta=self.lookahead_eta, sigma=ss.sigma, sigma_next=ss.sigma_next
+        )
+        if sr.sigma_next == sigma_down:
+            return x
+        dt = (
+            torch.sqrt(1.0 + (ss.sigma - sigma_down) ** 2) * 0.05
+            + (ss.sigma - sigma_down) * 0.95
+        ) * self.lookahead_dt_factor
+        denoised = sr.denoised
+        d = (orig_x - denoised) / ss.sigma
+        x = orig_x + d * -dt
+        if sigma_down == 0 or sigma_up == 0:
+            return x
+        noise_sampler = ss.noise.make_caching_noise_sampler(
+            self.custom_noise,
+            1,
+            ss.sigma,
+            ss.sigma_next,
+            immiscible=fallback(self.immiscible, ss.noise.immiscible),
+        )
+        x += ss.noise.scale_noise(noise_sampler(refs=ss.refs), sigma_up)
+        return x
+
+
 MERGE_SUBSTEPS_CLASSES = {
     "default (simple)": SimpleSubstepsSampler,
-    "normal": NormalMergeSubstepsSampler,
+    "supreme_avg": SupremeAvgMergeSubstepsSampler,
     "divide": DivideMergeSubstepsSampler,
     "overshoot": OvershootMergeSubstepsSampler,
-    # "average": AverageMergeSubstepsSampler,
-    # "sample": SampleMergeSubstepsSampler,
-    # "sample_uncached": SampleUncachedMergeSubstepsSampler,
     "simple": SimpleSubstepsSampler,
+    "lookahead": LookaheadMergeSubstepsSampler,
 }
