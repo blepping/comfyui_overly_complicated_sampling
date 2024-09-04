@@ -594,7 +594,9 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
             ss.sigma_next,
             immiscible=fallback(self.immiscible, ss.noise.immiscible),
         )
-        x += ss.noise.scale_noise(noise_sampler(refs=ss.refs), sigma_up)
+        x += ss.noise.scale_noise(
+            noise_sampler(refs=ss.refs), sigma_up * self.lookahead_s_noise
+        )
         return x
 
 
