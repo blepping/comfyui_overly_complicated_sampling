@@ -6,18 +6,20 @@ Experimental and mathematically unsound (but fun!) sampling for [ComfyUI](https:
 
 Feel free create a question in Discussions for usage help: [OCS Q&A Discussion](https://github.com/blepping/comfyui_overly_complicated_sampling/discussions/categories/q-a)
 
+_Note for Flux users_: Set `cfg1_uncond_optimization: true` in the `model` block for the main `OCS Sampler` as Flux does not use CFG. CFG++ and alt CFG++ features do not work with Flux.
+
 ## Features
 
 * Many different samplers.
 * Allows scheduling samplers (i.e. run `euler` for steps 1-4, then switch to `dpmpp_sde`).
 * CFG++ support (for some samplers).
-* Native support for Restart sigmas.
+* Native support for Restart sigmas. (Restarts do not currently work with RF models like Flux.)
 * Supports custom noise types.
 * Immiscible noise for sampling and Restart. See https://arxiv.org/abs/2406.12303 (note that it was designed for training not inference).
 * Allows splitting/combining steps in various ways for (potentially) more accurate sampling.
 * Supports Diffrax, torchdiffeq, torchode and torchsde solver backends. (SDE mode not recommended currently.)
 * Many tuneable parameters to play with.
-
+* Supports ancestral sampling (in a janky way) for rectified flow models like Flux, works for most basic samplers: does not work for SDE samplers currently.
 
 ## Credits
 
