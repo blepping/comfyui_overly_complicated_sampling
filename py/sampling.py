@@ -44,9 +44,12 @@ def composable_sampler(
             return torch.randn_like(x)
 
     restart_params = copts.get("restart", {})
+    restart_custom_noise = copts.get("restart_custom_noise")
+    if isinstance(restart_custom_noise, str):
+        restart_custom_noise = copts.get(f"restart_custom_noise_{restart_custom_noise}")
     restart = Restart(
         s_noise=restart_params.get("s_noise", 1.0),
-        custom_noise=copts.get("restart_custom_noise"),
+        custom_noise=restart_custom_noise,
         immiscible=restart_params.get("immiscible", False),
     )
 
@@ -84,7 +87,6 @@ def composable_sampler(
     step_count = sum(len(chunk) - 1 for _noise, chunk in sigma_chunks)
     ss.total_steps = step_count
     step = 0
-    restart_snoise = copts.get("restart_s_noise", 1.0)
     with trange(step_count, disable=ss.disable_status) as pbar:
         for noise_scale, chunk_sigmas in sigma_chunks:
             if step != 0 and noise_scale != 0:
@@ -102,10 +104,7 @@ def composable_sampler(
             nsc.min_sigma, nsc.max_sigma = chunk_sigmas[-1], chunk_sigmas[0]
             if step != 0 and noise_scale != 0:
                 restart_ns = restart.get_noise_sampler(nsc)
-                x += nsc.scale_noise(
-                    restart_ns(refs=prev_refs | ss.refs),
-                    noise_scale * restart_snoise,
-                )
+                x += nsc.scale_noise(restart_ns(refs=prev_refs | ss.refs), noise_scale)
                 del restart_ns
                 del prev_refs
             for idx in range(len(chunk_sigmas) - 1):

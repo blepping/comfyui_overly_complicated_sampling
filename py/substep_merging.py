@@ -119,9 +119,7 @@ class SimpleSubstepsSampler(MergeSubstepsSampler):
 
     def step(self, x):
         ss, ssampler = self.ss, self.samplers[0]
-        custom_noise = ssampler.options.get(
-            "custom_noise", self.options.get("custom_noise")
-        )
+        custom_noise = ssampler.custom_noise
         noise_sampler = ss.noise.make_caching_noise_sampler(
             custom_noise,
             1,
@@ -153,9 +151,7 @@ class SupremeAvgMergeSubstepsSampler(MergeSubstepsSampler):
         ss.refs = FilterRefs.from_ss(ss, have_current=True)
         self.callback()
         for ssampler in self.samplers:
-            custom_noise = ssampler.options.get(
-                "custom_noise", self.options.get("custom_noise")
-            )
+            custom_noise = ssampler.custom_noise
             noise_sampler = ss.noise.make_caching_noise_sampler(
                 custom_noise,
                 ssampler.max_noise_samples(),
@@ -395,9 +391,7 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
         substep = 0
         pbar = tqdm.tqdm(total=self.substeps, initial=0, disable=ss.disable_status)
         for ssampler in self.samplers:
-            custom_noise = ssampler.options.get(
-                "custom_noise", self.options.get("custom_noise")
-            )
+            custom_noise = ssampler.custom_noise
             noise_sampler = ss.noise.make_caching_noise_sampler(
                 custom_noise,
                 ssampler.max_noise_samples(),
@@ -438,9 +432,14 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         super().__init__(ss, group, **kwargs)
         self.overshoot_expand_steps = self.options.pop("overshoot_expand_steps", 1)
         restart = self.options.pop("restart", {})
+        restart_custom_noise = self.options.get("restart_custom_noise")
+        if isinstance(restart_custom_noise, str):
+            restart_custom_noise = self.options.get(
+                f"restart_custom_noise_{restart_custom_noise}"
+            )
         self.restart = Restart(
             s_noise=restart.get("s_noise", 1.0),
-            custom_noise=self.options.pop("restart_custom_noise", None),
+            custom_noise=restart_custom_noise,
             immiscible=restart.get("immiscible", False),
         )
 
@@ -472,9 +471,7 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         max_idx = len(subss.sigmas) - 2
         last_down = None
         for ssampler in self.samplers:
-            custom_noise = ssampler.options.get(
-                "custom_noise", self.options.get("custom_noise")
-            )
+            custom_noise = ssampler.custom_noise
             noise_sampler = ss.noise.make_caching_noise_sampler(
                 custom_noise,
                 ssampler.max_noise_samples(),
@@ -530,6 +527,8 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
         )
 
         self.custom_noise = self.options.get("custom_noise")
+        if isinstance(self.custom_noise, str):
+            self.custom_noise = self.options.get(f"custom_noise_{self.custom_noise}")
 
     def step(self, x):
         orig_x = x.clone()
@@ -543,11 +542,8 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
             substeps_remain = eff_substeps - substep
             if substeps_remain == 0:
                 break
-            custom_noise = ssampler.options.get(
-                "custom_noise", self.options.get("custom_noise")
-            )
             noise_sampler = ss.noise.make_caching_noise_sampler(
-                custom_noise,
+                ssampler.custom_noise,
                 ssampler.max_noise_samples(),
                 ss.sigma,
                 ss.sigma_next,

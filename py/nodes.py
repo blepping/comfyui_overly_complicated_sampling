@@ -332,6 +332,20 @@ class ParamNode:
             },
         }
 
+    @classmethod
+    def get_renamed_key(cls, key, params):
+        rename = params.get("rename")
+        if rename is None:
+            return key
+        if not isinstance(rename, str):
+            raise ValueError("Param rename key must be a string if set")
+        rename = rename.strip()
+        if not rename or not all(c == "_" or c.isalnum() for c in rename):
+            raise ValueError(
+                "Param rename keys must consist of one or more alphanumeric or underscore characters"
+            )
+        return f"{key}_{rename}"
+
     def go(self, *, key, value, params_opt=None, parameters=""):
         if not self.OCS_PARAM_TYPES[key](value):
             raise ValueError(f"CSamplerParam: Bad value type for key {key}")
@@ -340,6 +354,7 @@ class ParamNode:
             if extra_params is not None:
                 if not isinstance(extra_params, dict):
                     raise ValueError("Parameters must be a JSON or YAML object")
+                key = self.get_renamed_key(key, extra_params)
         else:
             extra_params = None
         params = ParamGroup(items={}) if params_opt is None else params_opt.clone()
@@ -349,7 +364,7 @@ class ParamNode:
         return (params,)
 
 
-class MultiParamNode:
+class MultiParamNode(ParamNode):
     RETURN_TYPES = ("OCS_PARAMS",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Overly Complicated Sampling parameter definition node. Used to set parameters like custom noise types that require an input. Like the OCS Param node but allows setting multiple parameters at the same time."
@@ -419,10 +434,11 @@ class MultiParamNode:
             key, value = kwargs.get(f"key_{idx}"), kwargs.get(f"value_opt_{idx}")
             if not key or value is None:
                 continue
-            if not ParamNode.OCS_PARAM_TYPES[key](value):
+            if not self.OCS_PARAM_TYPES[key](value):
                 raise ValueError(f"CSamplerParamGroup: Bad value type for key {key}")
-            params[key] = value
             extra = extra_params.get(str(idx))
+            key = self.get_renamed_key(key, extra)
+            params[key] = value
             if extra is not None:
                 params[f"{key}.params"] = extra
 

@@ -202,6 +202,9 @@ class SingleStepSampler(CFGPPStepMixin):
         self.post_filter = (
             None if post_filter is None else filtering.make_filter(post_filter)
         )
+        self.custom_noise = self.options.get("custom_noise")
+        if isinstance(self.custom_noise, str):
+            self.custom_noise = self.options.get(f"custom_noise_{self.custom_noise}")
 
     def __call__(self, x, ss):
         orig_x = x

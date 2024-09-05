@@ -596,6 +596,50 @@ dyn_deta_mode: "lerp"
 
 </details>
 
+### `OCS Param` and `OCS MultiParam`
+
+Allows specifying parameter inputs that can't be expressed with YAML, such as custom noise.
+
+#### Node Parameters
+
+* `key`: Determines the parameter input type.
+
+#### Input Parameters
+
+* `value`: Input for the actual parameter - must match the specified input type or you will get an error when you evaluate the workflow.
+* `params_opt`: Allows connecting another `OCS Param` or `OCS MultiParam` node to specify multiple parameters.
+
+#### Text Parameters
+
+Allows specifying extra parameters. You may use this block to rename a key, for example if your key type was `custom_noise` you could enter:
+
+```yaml
+rename: test
+```
+
+in the `OCS Param` node and:
+
+```yaml
+custom_noise: test
+```
+
+in the node that was connected to the params to have it use the custom noise specifically named `test`.
+
+### `OCS MultiParam`
+
+MultiParam is the same as Param except it has multiple optional inputs like `key_1`, `key_2`, etc.
+
+#### Text Parameters
+
+Same as `OCS Param` (see above), however if set you should use an object with a key corresponding to the index of the param. For example, if you wanted to rename `key_1` and `key_2` you would do something like:
+
+```yaml
+1:
+    rename: test1
+2:
+    rename: test2
+```
+
 ### `OCS SimpleRestartSchedule`
 
 Generates a restart schedule.
