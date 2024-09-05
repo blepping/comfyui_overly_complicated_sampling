@@ -17,6 +17,7 @@ from comfy.k_diffusion.sampling import (
 )
 
 from . import filtering, noise, res_support, utils
+from . import expression as expr
 from .utils import fallback
 
 HAVE_DIFFRAX = HAVE_TDE = HAVE_TODE = False
@@ -2174,6 +2175,94 @@ class AdapterStep(SingleStepSampler):
         yield from self.result(ss, result, ss.sigma.new_zeros(1))
 
 
+class DynamicStep(SingleStepSampler):
+    name = "dynamic"
+    sample_sigma_zero = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        dynamic = self.options.get("dynamic")
+        if dynamic is None:
+            raise ValueError(
+                "Dynamic sampler type requires specifying dynamic block in text parameters"
+            )
+        if isinstance(dynamic, str):
+            dynamic = ({"expression": dynamic},)
+        elif not isinstance(dynamic, (tuple, list)):
+            raise ValueError(
+                "Bad type for dynamic block: must be string or list of objects"
+            )
+        elif len(dynamic) == 0:
+            raise ValueError("Dynamic block as a list cannot be empty")
+        dynresult = []
+        for idx, item in enumerate(dynamic):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Bad item in dynamic block at index {idx}: must be a dict"
+                )
+            dyn_when = item.get("when")
+            if isinstance(dyn_when, str):
+                dyn_when = expr.Expression(dyn_when)
+            elif dyn_when is not None:
+                raise ValueError(
+                    f"Unexpected type for when key in dynamic block at index {idx}, must be string or null/unset"
+                )
+            dyn_params = item.get("expression")
+            if not isinstance(dyn_params, str):
+                raise ValueError(
+                    f"Missing or incorrectly typed expression key for dynamic block at index {idx}: must be a string"
+                )
+            dynresult.append((dyn_when, expr.Expression(dyn_params)))
+        self.dynamic = tuple(dynresult)
+
+    def step(self, x, ss):
+        sampler_params = None
+        handlers = filtering.FILTER_HANDLERS.clone(constants=ss.refs)
+        for idx, (dyn_when, dyn_params) in enumerate(self.dynamic):
+            if dyn_when is not None and not bool(dyn_when.eval(handlers)):
+                continue
+            sampler_params = dyn_params.eval(handlers)
+            if sampler_params is not None:
+                break
+        if sampler_params is None:
+            raise RuntimeError(
+                "Dynamic sampler could not find matching sampler: all expressions failed to return a result"
+            )
+        if not isinstance(sampler_params, dict):
+            raise TypeError(
+                f"Dynamic sampler expression must evaluate to a dict, got type {type(sampler_params)}"
+            )
+        if bool(sampler_params.get("dynamic_inherit")):
+            copy_keys = (
+                "s_noise",
+                "eta",
+                "pre_filter",
+                "post_filter",
+                "immiscible",
+            )
+            opts = {k: getattr(self, k) for k in copy_keys}
+        else:
+            opts = {}
+        opts["custom_noise"] = self.custom_noise
+        opts |= sampler_params
+        opts |= {k: v for k, v in self.options.items() if k.startswith("custom_noise_")}
+        # print("\n\nDYN OPTS", opts)
+        step_method = opts.get("step_method", "default")
+        sampler_class = STEP_SAMPLER_SIMPLE_NAMES.get(step_method)
+        if sampler_class is None:
+            raise ValueError(f"Unknown step method {step_method} in dynamic sampler")
+        sampler = sampler_class(**opts)
+        noise_sampler = ss.noise.make_caching_noise_sampler(
+            sampler.custom_noise,
+            sampler.max_noise_samples(),
+            ss.sigma,
+            ss.sigma_next,
+            immiscible=fallback(sampler.immiscible, ss.noise.immiscible),
+        )
+        self.noise_sampler = sampler.noise_sampler = noise_sampler
+        yield from sampler.step(x, ss)
+
+
 STEP_SAMPLERS = {
     "default (euler)": EulerStep,
     "adapter (variable)": AdapterStep,
@@ -2184,6 +2273,7 @@ STEP_SAMPLERS = {
     "dpmpp_2s": DPMPP2SStep,
     "dpmpp_3m_sde": DPMPP3MSDEStep,
     "dpmpp_sde (1)": DPMPPSDEStep,
+    "dynamic (variable)": DynamicStep,
     "euler_cycle": EulerCycleStep,
     "euler_dancing": EulerDancingStep,
     "euler": EulerStep,
@@ -2206,8 +2296,11 @@ STEP_SAMPLERS = {
     "ttm_jvp (1)": TTMJVPStep,
 }
 
+STEP_SAMPLER_SIMPLE_NAMES = {k.split(None, 1)[0]: v for k, v in STEP_SAMPLERS.items()}
+
 __all__ = (
     "STEP_SAMPLERS",
+    "STEP_SAMPLER_SIMPLE_NAMES",
     "EulerStep",
     "EulerCycleStep",
     "DPMPP2MStep",

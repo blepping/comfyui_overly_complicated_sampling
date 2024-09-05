@@ -20,6 +20,7 @@ _Note for Flux users_: Set `cfg1_uncond_optimization: true` in the `model` block
 * Supports Diffrax, torchdiffeq, torchode and torchsde solver backends. (SDE mode not recommended currently.)
 * Many tuneable parameters to play with.
 * Supports ancestral sampling (in a janky way) for rectified flow models like Flux, works for most basic samplers: does not work for SDE samplers currently.
+* Built in safe expression language that allows filtering and manipulating nearly all parameters during sampling.
 
 ## Credits
 
@@ -234,13 +235,21 @@ When running multiple substeps per step, the results will combined based on the 
 * `supreme_avg`: The model is called at least once per step (and possibly additional times for higher order samplers). Each substep shares the first model call result. The results are averaged together. *Note*: Since the first model call is shared and the initial input is the same for each substep, there is no point in running multiple identical substeps. Also note: This merge strategy doesn't work well with non-ancestral samplers (i.e. dpmpp_2m or any sampler with `eta: 0`).
 * `overshoot`: The model is called at least once per step. It will sample steps equal to the number of substeps, starting from the current step. Then it will restart back to the expected step.
 * `lookahead`: Similar to `overshoot`, it samples ahead based on the number of substeps. The last model prediction is used to do a Euler step to the expected step. *Note:* Very experimental, likely to change in the future.
-<!--
-* `average`: The model is called once at the beginning of the step and substeps share that result (but it may be called additional times for higher order samplers). This means substeps for samplers like reversible Euler, Heun 1s, DPM++ 2m SDE are essentially free. May be theoretically very unsound and inaccurate, requires manual tweaking of settings like `s_noise`. Supports the parameter `avgmerge_stretch`(`0.4`) which basically rolls back the current sigma and adds some noise (otherwise running a substep is deterministic and there would be no point to running a sampler like Euler more than once).
-* `sample`: Like `average` (and uses `avgmerge_stretch`) but instead of simply using the average, it does a sampler step toward that instead. You can plug in any substep sampler to the `merge_sampler_opt` input (if unconnected and the merge method is `sample` then Euler will be used). *Note*: Substeps in the attached sampler will be ignored.
-* `sample_uncached`: Similar to `sample`, however it calls the model per substep instead of caching the result and sharing it. Aside from sampling toward the result, it works more like the `normal` merge strategy. Theoretically it should be better because it's taking less shortcuts but results seem worse.
+* `dynamic`: Allows specifying the group parameters as an expression to be evaluated. See below.
 
-When using `average` and `sample` merge strategies and with model call caching enabled you can get away with setting substeps super high. Running something like 100 substeps is actually quite practical and seems to work well.
--->
+**Dynamic Groups**: When `merge_method` is set to `dynamic` you must specify a `dynamic` block in the text parameters. The dynamic block may be either a string with the expression or a list of objects with an (optional) `when` key and a (required) `expression` key. The expression should return a dictionary of parameters you can set in the node (including both keys/values from the text parameters and widgets in the node). The first matching item will be used. Example:
+
+```yaml
+# Use the simple merge method when step < 3, otherwise use overshoot
+dynamic:
+    - when: step < 3
+      expression: dict(merge_method :> 'simple)
+    - expression: dict(merge_method :> 'overshoot)
+
+# You could also write it like this:
+dynamic: |
+    dict(merge_method :> (step < 3 ? 'simple : 'overshoot)
+```
 
 #### Node Parameters
 
@@ -344,6 +353,7 @@ In alphabetical order.
 * `dpmpp_2s`
 * `dpmpp_3m_sde`: See parameters: `history_limit`
 * `dpmpp_sde`
+* `dynamic`: Advanced step method that allows using an expression to determine the sampler parameters at each substep. See below for a more detailed explanation.
 * `euler_cycle`: See parameters: `cycle_pct`
 * `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`
 * `euler`:
@@ -377,6 +387,7 @@ In alphabetical order.
 |`dpmpp_2s`|2|||||
 |`dpmpp_3m_sde`|1|1-2 (2)||||
 |`dpmpp_sde`|2|||||
+|`dynamic`|?|?|?|?|?|
 |`euler_cycle`|1||||X|
 |`euler_dancing`|1|||||
 |`euler`|1||||X|
@@ -421,6 +432,23 @@ Each step has an expected noise level, with the first step generally being pure 
 When doing ancestral sampling, we actually _overshoot_ expected noise for the next step and add less than that amount back to `denoised`. Then we generate some of our own noise and add it, scaled so that the result matches `expected_noise_at_next_step`. `eta` controls how the scale of the overshoot.
 
 The difference with cycle is that instead of adding `noise * expected_noise_at_next_step`, we instead first add `noise * (expected_noise_at_next_step * (1.0 - cycle_pct))` and then we generate noise and scale it to `cycle_pct` and add it too. Just for example, suppose `cycle_pct` is `0.2`: we'll add 80% of the expected noise at the next step (`1.0 - 0.2 == 0.8`) and then generate the remaining 20% and add it in to meet the expected amount. I don't recommend setting `cycle_pct` to values over `0.5`, especially if using "weird" noise types.
+
+**Dynamic Step Method**: When `step_method` is set to `dynamic` you must specify a `dynamic` block in the text parameters. The dynamic block may be either a string with the expression or a list of objects with an (optional) `when` key and a (required) `expression` key. The first matching item will be used. The expression should return a dictionary of parameters you can set in the node (including both keys/values from the text parameters and widgets in the node). Example:
+
+```yaml
+# Use the rk4 merge method when step < 3, otherwise use euler
+dynamic:
+    - when: step < 3
+      expression: dict(step_method :> 'rk4)
+    - expression: dict(step_method :> 'euler)
+
+# You could also write it like this:
+dynamic: |
+    dict(step_method :> (step < 3 ? 'rk4 : 'euler)
+```
+
+*Note*: You can set all sampler parameters except `substeps` this way. Sampling will use the `substeps` value from the `OCS Substeps` node.
+
 
 #### Node Parameters
 

@@ -6,10 +6,11 @@ import tqdm
 from . import expression as expr
 from . import utils
 
-from .filtering import make_filter, FilterRefs
+from .filtering import make_filter, FilterRefs, FILTER_HANDLERS
 from .noise import ImmiscibleNoise
 from .restart import Restart
 from .step_samplers import STEP_SAMPLERS
+from .substep_sampling import StepSamplerChain
 from .utils import check_time, fallback
 
 
@@ -21,6 +22,7 @@ class MergeSubstepsSampler:
             STEP_SAMPLERS[sitem["step_method"]](**sitem) for sitem in group.items
         )
         options = group.options.copy()
+        self.group = group
         self.time_mode = group.time_mode
         self.time_start = group.time_start
         self.time_end = group.time_end
@@ -596,6 +598,87 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
         return x
 
 
+class DynamicMergeSubstepsSampler(MergeSubstepsSampler):
+    name = "dynamic"
+
+    def __init__(self, ss, group, **kwargs):
+        super().__init__(ss, group, **kwargs)
+        dynamic = self.options.get("dynamic")
+        if dynamic is None:
+            raise ValueError(
+                "Dynamic group type requires specifying dynamic block in text parameters"
+            )
+        if isinstance(dynamic, str):
+            dynamic = ({"expression": dynamic},)
+        elif not isinstance(dynamic, (tuple, list)):
+            raise ValueError(
+                "Bad type for dynamic block: must be string or list of objects"
+            )
+        elif len(dynamic) == 0:
+            raise ValueError("Dynamic block as a list cannot be empty")
+        dynresult = []
+        for idx, item in enumerate(dynamic):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Bad item in dynamic block at index {idx}: must be a dict"
+                )
+            dyn_when = item.get("when")
+            if isinstance(dyn_when, str):
+                dyn_when = expr.Expression(dyn_when)
+            elif dyn_when is not None:
+                raise ValueError(
+                    f"Unexpected type for when key in dynamic block at index {idx}, must be string or null/unset"
+                )
+            dyn_params = item.get("expression")
+            if not isinstance(dyn_params, str):
+                raise ValueError(
+                    f"Missing or incorrectly typed expression key for dynamic block at index {idx}: must be a string"
+                )
+            dynresult.append((dyn_when, expr.Expression(dyn_params)))
+        self.dynamic = tuple(dynresult)
+
+    def step(self, x):
+        group_params = None
+        handlers = FILTER_HANDLERS.clone(constants=self.ss.refs)
+        for idx, (dyn_when, dyn_params) in enumerate(self.dynamic):
+            if dyn_when is not None and not bool(dyn_when.eval(handlers)):
+                continue
+            group_params = dyn_params.eval(handlers)
+            if group_params is not None:
+                break
+        if group_params is None:
+            raise RuntimeError(
+                "Dynamic group could not find matching group: all expressions failed to return a result"
+            )
+        if not isinstance(group_params, dict):
+            raise TypeError(
+                f"Dynamic group expression must evaluate to a dict, got type {type(group_params)}"
+            )
+        if bool(group_params.get("dynamic_inherit")):
+            copy_keys = ("preview_mode",)
+            opts = {k: getattr(self, k) for k in copy_keys}
+        else:
+            opts = {}
+        opts |= {
+            k: v
+            for k, v in self.options.items()
+            if k.startswith("custom_noise") or k.startswith("restart_custom_noise")
+        }
+        opts |= group_params
+        # print("\n\nDYN GROUP OPTS", opts)
+        merge_method = opts.pop("merge_method", "simple").strip()
+        if merge_method == "default":
+            merge_method = "simple"
+        group_class = MERGE_SUBSTEPS_CLASSES.get(merge_method)
+        if group_class is None:
+            raise ValueError(f"Unknown merge method {merge_method} in dynamic group")
+        group = StepSamplerChain(
+            merge_method=merge_method, items=self.group.items, **opts
+        )
+        sampler = group_class(self.ss, group)
+        return sampler.step(x)
+
+
 MERGE_SUBSTEPS_CLASSES = {
     "default (simple)": SimpleSubstepsSampler,
     "supreme_avg": SupremeAvgMergeSubstepsSampler,
@@ -603,4 +686,5 @@ MERGE_SUBSTEPS_CLASSES = {
     "overshoot": OvershootMergeSubstepsSampler,
     "simple": SimpleSubstepsSampler,
     "lookahead": LookaheadMergeSubstepsSampler,
+    "dynamic": DynamicMergeSubstepsSampler,
 }
