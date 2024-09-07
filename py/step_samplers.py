@@ -147,26 +147,15 @@ class SamplerResult:
         return obj
 
 
-class CFGPPStepMixin:
-    allow_cfgpp = False
-    allow_alt_cfgpp = False
-
-    def __init__(self):
-        self.cfgpp = self.allow_cfgpp and self.options.pop("cfgpp", False)
-        alt_cfgpp_scale = self.options.pop("alt_cfgpp_scale", 0.0)
-        self.alt_cfgpp_scale = 0.0 if not self.allow_alt_cfgpp else alt_cfgpp_scale
-
-    def to_d(self, mr, **kwargs):
-        return mr.to_d(alt_cfgpp_scale=self.alt_cfgpp_scale, cfgpp=self.cfgpp, **kwargs)
-
-
-class SingleStepSampler(CFGPPStepMixin):
+class SingleStepSampler:
     name = None
     self_noise = 0
     model_calls = 0
     ancestralize = False
     sample_sigma_zero = False
     immiscible = None
+    allow_cfgpp = False
+    allow_alt_cfgpp = False
 
     def __init__(
         self,
@@ -184,7 +173,9 @@ class SingleStepSampler(CFGPPStepMixin):
         **kwargs,
     ):
         self.options = kwargs
-        super().__init__()
+        self.cfgpp = self.allow_cfgpp and self.options.pop("cfgpp", False) is True
+        alt_cfgpp_scale = self.options.pop("alt_cfgpp_scale", 0.0)
+        self.alt_cfgpp_scale = 0.0 if not self.allow_alt_cfgpp else alt_cfgpp_scale
         self.s_noise = s_noise
         self.eta = eta
         self.dyn_eta_start = dyn_eta_start
@@ -302,8 +293,25 @@ class SingleStepSampler(CFGPPStepMixin):
     def get_dyn_eta(self, ss):
         return self.eta * self.get_dyn_value(ss, self.dyn_eta_start, self.dyn_eta_end)
 
+    @property
     def max_noise_samples(self):
         return (1 + self.self_noise) * self.substeps
+
+    @property
+    def require_uncond(self):
+        return self.cfgpp or self.alt_cfgpp_scale != 0
+
+    def to_d(self, mr, **kwargs):
+        return mr.to_d(alt_cfgpp_scale=self.alt_cfgpp_scale, cfgpp=self.cfgpp, **kwargs)
+
+    def call_model(self, ss, *args, **kwargs):
+        kwargs["require_uncond"] = self.require_uncond or kwargs.get(
+            "require_uncond", False
+        )
+        kwargs["cfg_scale_override"] = kwargs.get(
+            "cfg_scale_override", ss.cfg_scale_override
+        )
+        return ss.call_model(*args, ss=ss, **kwargs)
 
 
 class HistorySingleStepSampler(SingleStepSampler):
@@ -383,7 +391,7 @@ class MinSigmaStepMixin:
         result = yield from self.result(
             ss, result, sigma_up, sigma=ss.sigma, sigma_next=sn, final=False
         )
-        mr = ss.model(result, sn, ss=ss, call_index=mcc)
+        mr = self.call_model(ss, result, sn, call_index=mcc)
         dt = ss.sigma_next - sn
         result = result + self.to_d(mr) * dt
         return sigma_up.new_zeros(1), result
@@ -542,7 +550,7 @@ class ReversibleHeunStep(ReversibleSingleStepSampler):
         x_pred = ss.denoised + d * sigma_down
 
         # Denoised sample at the next sigma
-        mr_next = ss.model(x_pred, sigma_down, ss=ss, call_index=1)
+        mr_next = self.call_model(ss, x_pred, sigma_down, call_index=1)
 
         # Calculate the derivative at the next sigma
         d_next = self.to_d(mr_next)
@@ -716,7 +724,7 @@ class RESStep(SingleStepSampler):
         lam_2 = lam + c2_h
         sigma_2 = lam_2.neg().exp()
 
-        denoised2 = ss.model(x_2, sigma_2, ss=ss, call_index=1).denoised
+        denoised2 = self.call_model(ss, x_2, sigma_2, call_index=1).denoised
 
         x = math.exp(-h) * eff_x + h * (b1 * denoised + b2 * denoised2)
         yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
@@ -738,7 +746,7 @@ class TrapezoidalStep(SingleStepSampler):
         x_pred = x + d_i * ss.dt
 
         # Denoised sample at the next sigma
-        mr_next = ss.model(x_pred, ss.sigma_next, ss=ss, call_index=1)
+        mr_next = self.call_model(ss, x_pred, ss.sigma_next, call_index=1)
 
         # Calculate the derivative at the next sigma
         d_next = self.to_d(mr_next)
@@ -762,7 +770,7 @@ class TrapezoidalCycleStep(CycleSingleStepSampler):
         x_pred = x + d_i * ss.dt
 
         # Denoised sample at the next sigma
-        mr_next = ss.model(x_pred, ss.sigma_next, ss=ss, call_index=1)
+        mr_next = self.call_model(ss, x_pred, ss.sigma_next, call_index=1)
 
         # Calculate the derivative at the next sigma
         d_next = self.to_d(mr_next)
@@ -798,10 +806,12 @@ class BogackiStep(ReversibleSingleStepSampler):
 
         # Bogacki-Shampine steps
         k1 = d * dt
-        k2 = self.to_d(ss.model(x + k1 / 2, s + dt / 2, ss=ss, call_index=1)) * dt
+        k2 = self.to_d(self.call_model(ss, x + k1 / 2, s + dt / 2, call_index=1)) * dt
         k3 = (
             self.to_d(
-                ss.model(x + 3 * k1 / 4 + k2 / 4, s + 3 * dt / 4, ss=ss, call_index=2)
+                self.call_model(
+                    ss, x + 3 * k1 / 4 + k2 / 4, s + 3 * dt / 4, call_index=2
+                )
             )
             * dt
         )
@@ -834,9 +844,15 @@ class RK4Step(SingleStepSampler):
 
         # Runge-Kutta steps
         k1 = d * dt
-        k2 = self.to_d(ss.model(x + k1 / 2, sigma + dt / 2, ss=ss, call_index=1)) * dt
-        k3 = self.to_d(ss.model(x + k2 / 2, sigma + dt / 2, ss=ss, call_index=2)) * dt
-        k4 = self.to_d(ss.model(x + k3, sigma + dt, ss=ss, call_index=3)) * dt
+        k2 = (
+            self.to_d(self.call_model(ss, x + k1 / 2, sigma + dt / 2, call_index=1))
+            * dt
+        )
+        k3 = (
+            self.to_d(self.call_model(ss, x + k2 / 2, sigma + dt / 2, call_index=2))
+            * dt
+        )
+        k4 = self.to_d(self.call_model(ss, x + k3, sigma + dt, call_index=3)) * dt
 
         # Update the sample
         x = x + (k1 + 2 * k2 + 2 * k3 + k4) / 6
@@ -1087,7 +1103,7 @@ class DPMPP2SStep(SingleStepSampler, DPMPPStepMixin):
             else x + (ss.denoised - ss.hcur.denoised_uncond) * self.alt_cfgpp_scale
         )
         x_2 = (sigma_fn(s) / sigma_fn(t)) * eff_x - (-h * r).expm1() * ss.denoised
-        denoised_2 = ss.model(x_2, sigma_fn(s), ss=ss, call_index=1).denoised
+        denoised_2 = self.call_model(ss, x_2, sigma_fn(s), call_index=1).denoised
         x = (sigma_fn(t_next) / sigma_fn(t)) * eff_x - (-h).expm1() * denoised_2
         yield from self.result(ss, x, sigma_up, sigma_down=sigma_down)
 
@@ -1123,7 +1139,7 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
         x_2 = yield from self.result(
             ss, x_2, su, sigma=sigma_fn(t), sigma_next=sigma_fn(s), final=False
         )
-        denoised_2 = ss.model(x_2, sigma_fn(s), ss=ss, call_index=1).denoised
+        denoised_2 = self.call_model(ss, x_2, sigma_fn(s), call_index=1).denoised
 
         # Step 2
         sd, su = get_ancestral_step(sigma_fn(t), sigma_fn(t_next), eta)
@@ -1154,8 +1170,8 @@ class TTMJVPStep(SingleStepSampler):
         h_eta = h * (eta + 1)
 
         eps = to_d(x, sigma, ss.denoised)
-        denoised_prime = ss.model(
-            x, sigma, tangents=(eps * -sigma, -sigma), ss=ss, call_index=1
+        denoised_prime = self.call_model(
+            ss, x, sigma, tangents=(eps * -sigma, -sigma), call_index=1
         ).jdenoised
 
         phi_1 = -torch.expm1(-h_eta)
@@ -1347,7 +1363,7 @@ class HeunPP2Step(SingleStepSampler):
         w = order * ss.sigma
         w2 = sn / w
         x_2 = x + d * dt
-        d_2 = self.to_d(ss.model(x_2, sn, ss=ss, call_index=1))
+        d_2 = self.to_d(self.call_model(ss, x_2, sn, call_index=1))
         if order == 2:
             # Heun's method (ish)
             w1 = 1 - w2
@@ -1357,7 +1373,7 @@ class HeunPP2Step(SingleStepSampler):
             snn = ss.sigmas[ss.idx + 2]
             dt_2 = snn - sn
             x_3 = x_2 + d_2 * dt_2
-            d_3 = self.to_d(ss.model(x_3, snn, ss=ss, call_index=2))
+            d_3 = self.to_d(self.call_model(ss, x_3, snn, call_index=2))
             w3 = snn / w
             w1 = 1 - w2 - w3
             d_prime = w1 * d + w2 * d_2 + w3 * d_3
@@ -1465,8 +1481,8 @@ class TDEStep(DESolverStep):
                 mcc = 1
             else:
                 mr_cached = False
-                mr = ss.model(
-                    y.unsqueeze(0), t, ss=ss, call_index=mcc, s_in=t.new_ones(1)
+                mr = self.call_model(
+                    ss, y.unsqueeze(0), t, call_index=mcc, s_in=t.new_ones(1)
                 )
                 mcc += 1
             return self.to_d(mr)[bidx if mr_cached else 0]
@@ -1578,7 +1594,7 @@ class TODEStep(DESolverStep):
                 mr = ss.hcur
                 mcc = 1
             else:
-                mr = ss.model(y, t32.clamp(min=1e-05), ss=ss, call_index=mcc)
+                mr = self.call_model(ss, y, t32.clamp(min=1e-05), call_index=mcc)
                 mcc += 1
             result = self.to_d(mr).flatten(start_dim=1)
             for bi in range(t.shape[0]):
@@ -1708,10 +1724,10 @@ class TSDEStep(DESolverStep):
                     mcc = 1
                 else:
                     mr_cached = False
-                    mr = ss.model(
+                    mr = outer_self.call_model(
+                        ss,
                         y,
                         t32.clamp(min=1e-05),
-                        ss=ss,
                         call_index=mcc,
                         s_in=t.new_ones(1),
                     )
@@ -1955,13 +1971,15 @@ class DiffraxStep(DESolverStep):
                 mr_cached = False
                 try:
                     if not args:
-                        mr = ss.model(y, t32, ss=ss, call_index=mcc, s_in=t.new_ones(1))
+                        mr = self.call_model(
+                            ss, y, t32, call_index=mcc, s_in=t.new_ones(1)
+                        )
                     else:
                         print("TANGENTS")
-                        mr = ss.model(
+                        mr = self.call_model(
+                            ss,
                             y,
                             t32,
-                            ss=ss,
                             call_index=mcc,
                             tangents=args,
                             s_in=t.new_ones(1),
@@ -2096,7 +2114,7 @@ class HeunStep(ReversibleSingleStepSampler):
         hcur = ss.hcur
         d = self.to_d(hcur)
         x_next = hcur.denoised + d * sd
-        d_next = self.to_d(ss.model(x_next, sd, ss=ss, call_index=1))
+        d_next = self.to_d(self.call_model(ss, x_next, sd, call_index=1))
         result = hcur.denoised + d * s
         result += (dt * (d + d_next)) * 0.5
         result -= self.reversible_correction(ss, d, d_next)
@@ -2165,7 +2183,7 @@ class AdapterStep(SingleStepSampler):
             nonlocal mcc
             if torch.equal(x_, x) and sigma_ == ss.sigma:
                 return ss.hcur.denoised.clone()
-            mr = ss.model(x_, sigma_, *args, ss=ss, call_index=mcc, **kwargs)
+            mr = self.call_model(ss, x_, sigma_, *args, call_index=mcc, **kwargs)
             mcc += 1
             return mr.denoised.clone()
 

@@ -82,6 +82,7 @@ class StepSamplerGroups(CommonOptionsItems):
 
 class SamplerState:
     CLONE_KEYS = (
+        "cfg_scale_override",
         "model",
         "hist",
         "extra_args",
@@ -123,6 +124,7 @@ class SamplerState:
         s_noise=1.0,
         disable_status=False,
         history_size=4,
+        cfg_scale_override=None,
     ):
         self.model = model
         self.hist = History(max(1, history_size))
@@ -138,6 +140,7 @@ class SamplerState:
         self.step = 0
         self.substep = 0
         self.total_steps = len(sigmas) - 1
+        self.cfg_scale_override = cfg_scale_override
         self.update(idx)  # Sets idx, sigma_prev, sigma, sigma_down, refs
 
     @property
@@ -247,3 +250,7 @@ class SamplerState:
     def reset(self):
         self.hist.reset()
         self.denoised = None
+
+    def call_model(self, *args, **kwargs):
+        cfg_scale_override = kwargs.pop("cfg_scale_override", self.cfg_scale_override)
+        return self.model(*args, cfg_scale_override=cfg_scale_override, **kwargs)

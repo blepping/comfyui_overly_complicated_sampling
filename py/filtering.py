@@ -93,6 +93,8 @@ class FilterRefs:
             "step_pct": float(ss.step / ss.total_steps),
             "total_steps": ss.total_steps,
             "sampling_pct": (999 - ms.timestep(ss.sigma).item()) / 999,
+            "is_rectified_flow": ss.model.is_rectified_flow,
+            "original_cfg_scale": ss.model.inner_cfg_scale,
         })
         if have_current and len(ss.hist) > 0:
             fr |= cls.from_mr(ss.hcur)

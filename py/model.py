@@ -104,14 +104,15 @@ class ModelCallCache:
     def __init__(
         self,
         model,
-        x,
-        s_in,
-        extra_args,
+        x: torch.Tensor,
+        s_in: torch.Tensor,
+        extra_args: dict,
         *,
-        cache=None,
-        filter=None,
-        cfg1_uncond_optimization=False,
-    ):
+        cache: None | dict = None,
+        filter: None | dict = None,
+        cfg1_uncond_optimization: bool = False,
+        cfg_scale_override: None | int | float = None,
+    ) -> None:
         self.cache = ModelCallCacheConfig(**fallback(cache, {}))
         filtargs = fallback(filter, {}).copy()
         self.filters = {}
@@ -124,6 +125,7 @@ class ModelCallCache:
         self.s_in = s_in
         self.extra_args = extra_args
         self.cfg1_uncond_optimization = cfg1_uncond_optimization
+        self.cfg_scale_override = cfg_scale_override
         self.is_rectified_flow = x.shape[1] == 16 and isinstance(
             model.inner_model.inner_model.model_sampling, comfy.model_sampling.CONST
         )
@@ -131,13 +133,17 @@ class ModelCallCache:
             return
         self.reset_cache()
 
-    def maybe_filter(self, name, latent, *args, **kwargs):
+    def maybe_filter(
+        self, name: str, latent: torch.Tensor, *args: list, **kwargs: dict
+    ) -> torch.Tensor:
         filt = self.filters.get(name)
         if filt is None:
             return latent
         return filt.apply(latent, *args, **kwargs)
 
-    def filter_result(self, result, *args, **kwargs):
+    def filter_result(
+        self, result: ModelResult, *args: list, **kwargs: dict
+    ) -> ModelResult:
         if not self.filters:
             return result
         result = result.clone()
@@ -153,17 +159,17 @@ class ModelCallCache:
         return result
 
     @staticmethod
-    def _fr_add_mr(fr, mr):
+    def _fr_add_mr(fr: filtering.FilterRefs, mr: ModelResult) -> filtering.FilterRefs:
         frmr = filtering.FilterRefs.from_mr(mr)
         fr.kvs |= {f"{k}_curr": v for k, v in frmr.kvs.items()}
         return fr
 
-    def reset_cache(self):
+    def reset_cache(self) -> None:
         size = self.cache.size
         self.slot = [None] * size
         self.slot_use = [self.cache.max_use] * size
 
-    def get(self, idx, *, jvp=False):
+    def get(self, idx: int, *, jvp: bool = False) -> None | ModelResult:
         idx -= self.cache.threshold
         if (
             idx >= self.cache.size
@@ -178,32 +184,52 @@ class ModelCallCache:
         self.slot_use[idx] -= 1
         return result
 
-    def set(self, idx, mr):
+    def set(self, idx: int, mr: ModelResult) -> None:
         idx -= self.cache.threshold
         if idx < 0 or idx >= self.cache.size:
             return
         self.slot_use[idx] = self.cache.max_use
         self.slot[idx] = mr
 
-    def call_model(self, x, sigma, **kwargs):
+    def call_model(
+        self, x: torch.Tensor, sigma: torch.Tensor, **kwargs: dict
+    ) -> torch.Tensor:
         return self.model(x, sigma * self.s_in, **self.extra_args | kwargs)
 
     @property
     def model_sampling(self):
         return self.model.inner_model.inner_model.model_sampling
 
+    @property
+    def inner_cfg_scale(self) -> None | int | float:
+        maybe_cfg_scale = getattr(self.model.inner_model, "cfg", None)
+        return maybe_cfg_scale if isinstance(maybe_cfg_scale, (int, float)) else None
+
+    def set_inner_cfg_scale(self, scale: None | int | float) -> None | int | float:
+        eff_scale = self.cfg_scale_override
+        if scale is not None:
+            eff_scale = None if scale < 0 else scale
+        if eff_scale is None or eff_scale < 0:
+            return None
+        curr_cfg_scale = self.inner_cfg_scale
+        if curr_cfg_scale is None:
+            return None
+        self.model.inner_model.cfg = eff_scale
+        return curr_cfg_scale
+
     def __call__(
         self,
-        x,
-        sigma,
+        x: torch.Tensor,
+        sigma: torch.Tensor,
         *,
-        call_index=0,
+        call_index: int = 0,
         ss,
         s_in=None,
         tangents=None,
-        return_cached=False,
+        require_uncond: bool = False,
+        cfg_scale_override: None | int = None,
         **kwargs,
-    ):
+    ) -> ModelResult:
         filter_refs = ss.refs | filtering.FilterRefs({
             "model_call": call_index,
             "orig_x": x,
@@ -215,7 +241,7 @@ class ModelCallCache:
         if result is not None:
             self._fr_add_mr(filter_refs, result)
             result = self.filter_result(result, default_ref=x, refs=filter_refs)
-            return (result, True) if return_cached else result
+            return result
 
         comfy.model_management.throw_exception_if_processing_interrupted()
 
@@ -230,13 +256,16 @@ class ModelCallCache:
                 denoised_uncond = denoised_cond
             return args["denoised"]
 
-        extra_args = self.extra_args | {
-            "model_options": comfy.model_patcher.set_model_options_post_cfg_function(
-                model_options,
-                postcfg,
-                disable_cfg1_optimization=not self.cfg1_uncond_optimization,
-            )
-        }
+        orig_cfg_scale = self.set_inner_cfg_scale(cfg_scale_override)
+
+        model_options = comfy.model_patcher.set_model_options_post_cfg_function(
+            model_options,
+            postcfg,
+            disable_cfg1_optimization=require_uncond
+            or not self.cfg1_uncond_optimization,
+        )
+
+        extra_args = self.extra_args | {"model_options": model_options}
         s_in = fallback(s_in, self.s_in)
         x = self.maybe_filter("input", x, refs=filter_refs)
 
@@ -245,6 +274,7 @@ class ModelCallCache:
 
         if tangents is None:
             denoised = call_model(x, sigma, **kwargs)
+            self.set_inner_cfg_scale(orig_cfg_scale)
             mr = ModelResult(
                 call_index,
                 sigma,
@@ -256,8 +286,9 @@ class ModelCallCache:
             self.set(call_index, mr)
             self._fr_add_mr(filter_refs, mr)
             mr = self.filter_result(mr, default_ref=x, refs=filter_refs)
-            return (mr, False) if return_cached else mr
+            return mr
         denoised, denoised_prime = torch.func.jvp(call_model, (x, sigma), tangents)
+        self.set_inner_cfg_scale(orig_cfg_scale)
         mr = ModelResult(
             call_index,
             sigma,
@@ -270,4 +301,4 @@ class ModelCallCache:
         self.set(call_index, mr)
         self._fr_add_mr(filter_refs, mr)
         mr = self.filter_result(mr, default_ref=x, refs=filter_refs)
-        return (mr, False) if return_cached else mr
+        return mr
