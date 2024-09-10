@@ -94,6 +94,19 @@ class ModelResult:
             setattr(obj, k, val)
         return obj
 
+    def get_error(self, other, *, override=None, alt_cfgpp_scale=0, cfgpp=False):
+        slf = fallback(override, self)
+        first, second = (other, slf) if other.sigma > slf.sigma else (slf, other)
+        if first.sigma == second.sigma:
+            return 0.0
+        d = first.to_d(alt_cfgpp_scale=alt_cfgpp_scale, cfgpp=cfgpp)
+        d_pred = second.to_d(
+            x=first.x + d * (second.sigma - first.sigma),
+            alt_cfgpp_scale=alt_cfgpp_scale,
+            cfgpp=cfgpp,
+        )
+        return torch.linalg.norm(d_pred.sub_(d)).div_(torch.linalg.norm(d)).item()
+
 
 ModelCallCacheConfig = namedtuple(
     "ModelCallCacheConfig", ("size", "max_use", "threshold"), defaults=(0, 1000000, 1)

@@ -177,38 +177,56 @@ class SamplerState:
             self.substep = substep
         self.refs = FilterRefs.from_ss(self)
 
-    def get_ancestral_step(self, eta=1.0, sigma=None, sigma_next=None):
+    def get_ancestral_step(
+        self, eta=1.0, sigma=None, sigma_next=None, retry_increment=0
+    ):
         if self.model.is_rectified_flow:
             return self.get_ancestral_step_rf(
-                eta=eta, sigma=sigma, sigma_next=sigma_next
+                eta=eta,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                retry_increment=retry_increment,
             )
         sigma = fallback(sigma, self.sigma)
         sigma_next = fallback(sigma_next, self.sigma_next)
-        if eta == 0 or sigma_next <= 0:
+        if eta <= 0 or sigma_next <= 0:
             return sigma_next, sigma_next.new_zeros(1)
-        sd, su = (
-            v if isinstance(v, torch.Tensor) else sigma.new_full((1,), v)
-            for v in get_ancestral_step(
-                sigma, sigma_next, eta=eta if sigma_next != 0 else 0
+        while eta > 0:
+            sd, su = (
+                v if isinstance(v, torch.Tensor) else sigma.new_full((1,), v)
+                for v in get_ancestral_step(
+                    sigma, sigma_next, eta=eta if sigma_next != 0 else 0
+                )
             )
-        )
-        if not (sd > 0 and su > 0):
-            return sigma_next, sigma_next.new_zeros(1)
-        return sd, su
+            if sd > 0 and su > 0:
+                return sd, su
+            if retry_increment <= 0:
+                break
+            # print(f"\nETA {eta} failed, retrying with {eta - retry_increment}")
+            eta -= retry_increment
+        return sigma_next, sigma_next.new_zeros(1)
 
     # Referenced from Comfy dpmpp_2s_ancestral_RF
-    def get_ancestral_step_rf(self, eta=1.0, sigma=None, sigma_next=None):
+    def get_ancestral_step_rf(
+        self, eta=1.0, sigma=None, sigma_next=None, retry_increment=0
+    ):
         sigma = fallback(sigma, self.sigma)
         sigma_next = fallback(sigma_next, self.sigma_next)
-        if eta == 0 or sigma_next <= 0:
+        if eta <= 0 or sigma_next <= 0:
             return sigma_next, sigma_next.new_zeros(1)
-        sigma_down = sigma_next * (1 + (sigma_next / sigma - 1) * eta)
-        alpha_ip1, alpha_down = 1 - sigma_next, 1 - sigma_down
-        sigma_up = (sigma_next**2 - sigma_down**2 * alpha_ip1**2 / alpha_down**2) ** 0.5
-        if not (sigma_down > 0 and sigma_up > 0):
-            return sigma_next, sigma_next.new_zeros(1)
+        while eta > 0:
+            sigma_down = sigma_next * (1 + (sigma_next / sigma - 1) * eta)
+            alpha_ip1, alpha_down = 1 - sigma_next, 1 - sigma_down
+            sigma_up = (
+                sigma_next**2 - sigma_down**2 * alpha_ip1**2 / alpha_down**2
+            ) ** 0.5
+            if sigma_down > 0 and sigma_up > 0:
+                return sigma_down, sigma_up
+            if retry_increment <= 0:
+                break
+            eta -= retry_increment
+        return sigma_next, sigma_next.new_zeros(1)
         # print(f"\nRF ancestral: down={sigma_down}, up={sigma_up}")
-        return sigma_down, sigma_up
 
     def clone_edit(self, **kwargs):
         obj = self.__class__.__new__(self.__class__)

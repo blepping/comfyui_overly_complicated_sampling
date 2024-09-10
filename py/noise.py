@@ -193,6 +193,8 @@ class NoiseSamplerCache:
             immiscible = self.immiscible
 
         def noise_sampler_(
+            curr_sigma,
+            curr_sigma_next,
             *_unused,
             out_hw=(orig_h, orig_w),
             **_unusedkwargs,
@@ -203,7 +205,9 @@ class NoiseSamplerCache:
                     f"Noise size mismatch: {out_hw} vs {(orig_h, orig_w)}"
                 )
             if remain < 1:
-                noise = self.scale_noise(ns(sigma, sigma_next)).view(
+                curr_sigma = fallback(curr_sigma, sigma)
+                curr_sigma_next = fallback(curr_sigma_next, sigma_next)
+                noise = self.scale_noise(ns(curr_sigma, curr_sigma_next)).view(
                     size,
                     *self.x.shape,
                 )

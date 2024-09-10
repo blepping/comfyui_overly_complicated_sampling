@@ -104,7 +104,10 @@ def composable_sampler(
             nsc.min_sigma, nsc.max_sigma = chunk_sigmas[-1], chunk_sigmas[0]
             if step != 0 and noise_scale != 0:
                 restart_ns = restart.get_noise_sampler(nsc)
-                x += nsc.scale_noise(restart_ns(refs=prev_refs | ss.refs), noise_scale)
+                x += nsc.scale_noise(
+                    restart_ns(nsc.min_sigma, nsc.max_sigma, refs=prev_refs | ss.refs),
+                    noise_scale,
+                )
                 del restart_ns
                 del prev_refs
             for idx in range(len(chunk_sigmas) - 1):

@@ -9,7 +9,7 @@ from . import utils
 from .filtering import make_filter, FilterRefs, FILTER_HANDLERS
 from .noise import ImmiscibleNoise
 from .restart import Restart
-from .step_samplers import STEP_SAMPLERS
+from .step_samplers import STEP_SAMPLERS, StepSamplerContext
 from .substep_sampling import StepSamplerChain
 from .utils import check_time, fallback
 
@@ -79,14 +79,14 @@ class MergeSubstepsSampler:
     def step(self, x):
         raise NotImplementedError
 
-    def substep(self, x, sampler, ss=None):
-        sg = sampler(x, fallback(ss, self.ss))
+    def substep(self, x, sampler):
+        sg = sampler(x)
         yield from utils.step_generator(sg, get_next=lambda sr: sr.x)
 
-    def simple_substep(self, x, sampler, ss=None):
-        for sr in self.substep(x, sampler, ss=ss):
+    def simple_substep(self, x, sampler):
+        for sr in self.substep(x, sampler):
             if not sr.final:
-                sr.noise_x(ss=fallback(ss, self.ss))
+                raise RuntimeError("Unexpected non-final sampler result in substep!")
         return sr
 
     def merge_steps(self, x, result=None, *, noise=None, ss=None, denoised=True):
@@ -134,19 +134,11 @@ class SimpleSubstepsSampler(MergeSubstepsSampler):
 
     def step(self, x):
         ss, ssampler = self.ss, self.samplers[0]
-        custom_noise = ssampler.custom_noise
-        noise_sampler = ss.noise.make_caching_noise_sampler(
-            custom_noise,
-            1,
-            ss.sigma,
-            ss.sigma_next,
-            immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
-        )
-        ssampler.noise_sampler = noise_sampler
         ss.hist.push(self.call_model(x))
         ss.refs = FilterRefs.from_ss(ss, have_current=True)
         self.callback()
-        sr = self.simple_substep(x, ssampler)
+        with StepSamplerContext(ssampler, ss) as ssampler:
+            sr = self.simple_substep(x, ssampler)
         return self.merge_steps(sr.noise_x(ss=ss))
 
 
@@ -165,26 +157,18 @@ class SupremeAvgMergeSubstepsSampler(MergeSubstepsSampler):
         ss.hist.push(self.call_model(x))
         ss.refs = FilterRefs.from_ss(ss, have_current=True)
         self.callback()
-        for ssampler in self.samplers:
-            custom_noise = ssampler.custom_noise
-            noise_sampler = ss.noise.make_caching_noise_sampler(
-                custom_noise,
-                ssampler.max_noise_samples,
-                ss.sigma,
-                ss.sigma_next,
-                immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
-            )
-            ssampler.noise_sampler = noise_sampler
-            for subidx in range(ssampler.substeps):
-                pbar.set_description(f"{ssampler.name}: {substep + 1}/{substeps}")
-                sr = self.simple_substep(x, ssampler)
-                z_avg += renoise_weight * sr.x
-                if sr.noise_scale != 0 and ss.sigma_next != 0:
-                    noise_total += renoise_weight * sr.noise_scale
-                    noise += renoise_weight * sr.get_noise(ss=ss)
-                substep += 1
-                ss.substep = substep
-                pbar.update(1)
+        for ssampler_ in self.samplers:
+            with StepSamplerContext(ssampler_, ss) as ssampler:
+                for subidx in range(ssampler.substeps):
+                    pbar.set_description(f"{ssampler.name}: {substep + 1}/{substeps}")
+                    sr = self.simple_substep(x, ssampler)
+                    z_avg += renoise_weight * sr.x
+                    if sr.noise_scale != 0 and ss.sigma_next != 0:
+                        noise_total += renoise_weight * sr.noise_scale
+                        noise += renoise_weight * sr.get_noise(ss=ss)
+                    substep += 1
+                    ss.substep = substep
+                    pbar.update(1)
 
         noise = ss.noise.scale_noise(
             noise,
@@ -405,32 +389,24 @@ class DivideMergeSubstepsSampler(MergeSubstepsSampler):
         subss.main_sigmas = ss.sigmas
         substep = 0
         pbar = tqdm.tqdm(total=self.substeps, initial=0, disable=ss.disable_status)
-        for ssampler in self.samplers:
-            custom_noise = ssampler.custom_noise
-            noise_sampler = ss.noise.make_caching_noise_sampler(
-                custom_noise,
-                ssampler.max_noise_samples,
-                ss.sigma,
-                ss.sigma_next,
-                immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
-            )
-            ssampler.noise_sampler = noise_sampler
-            for subidx in range(ssampler.substeps):
-                subss.update(substep, substep=substep)
-                pbar.set_description(
-                    f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
-                )
-                subss.hist.push(self.call_model(x, ss=subss))
-                subss.refs = FilterRefs.from_ss(subss, have_current=True)
-                if substep == 0:
-                    self.callback(ss=subss)
-                sr = self.simple_substep(x, ssampler, ss=subss)
-                x = sr.x
-                noise_strength = sr.noise_scale
-                if noise_strength != 0 and subss.sigma_next != 0:
-                    x = sr.noise_x(ss=subss)
-                substep += 1
-                pbar.update(1)
+        for ssampler_ in self.samplers:
+            with StepSamplerContext(ssampler_, subss) as ssampler:
+                for subidx in range(ssampler.substeps):
+                    subss.update(substep, substep=substep)
+                    pbar.set_description(
+                        f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
+                    )
+                    subss.hist.push(self.call_model(x, ss=subss))
+                    subss.refs = FilterRefs.from_ss(subss, have_current=True)
+                    if substep == 0:
+                        self.callback(ss=subss)
+                    sr = self.simple_substep(x, ssampler)
+                    x = sr.x
+                    noise_strength = sr.noise_scale
+                    if noise_strength != 0 and subss.sigma_next != 0:
+                        x = sr.noise_x(ss=subss)
+                    substep += 1
+                    pbar.update(1)
         pbar.update(0)
         return x
 
@@ -485,42 +461,34 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
         pbar = tqdm.tqdm(total=self.substeps, initial=0, disable=ss.disable_status)
         max_idx = len(subss.sigmas) - 2
         last_down = None
-        for ssampler in self.samplers:
-            custom_noise = ssampler.custom_noise
-            noise_sampler = ss.noise.make_caching_noise_sampler(
-                custom_noise,
-                ssampler.max_noise_samples,
-                ss.sigma,
-                ss.sigma_next,
-                immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
-            )
-            ssampler.noise_sampler = noise_sampler
-            for subidx in range(ssampler.substeps):
-                subss.update(subss.idx + substep, substep=substep)
-                pbar.set_description(
-                    f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
-                )
-                subss.hist.push(self.call_model(x, ss=subss))
-                subss.refs = FilterRefs.from_ss(subss, have_current=True)
-                if substep == 0:
-                    ss.hist.push(subss.hcur)
-                    self.callback(ss=subss)
-                sr = self.simple_substep(x, ssampler, ss=subss)
-                x = sr.x
-                noise_strength = sr.noise_scale
-                if noise_strength != 0 and subss.sigma_next != 0:
-                    x = sr.noise_x(ss=subss)
-                substep += 1
-                pbar.update(1)
-                last_down = subss.sigma_next.item()
-                if subss.idx + substep >= max_idx:
+        for ssampler_ in self.samplers:
+            with StepSamplerContext(ssampler_, subss) as ssampler:
+                for subidx in range(ssampler.substeps):
+                    subss.update(subss.idx + substep, substep=substep)
+                    pbar.set_description(
+                        f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
+                    )
+                    subss.hist.push(self.call_model(x, ss=subss))
+                    subss.refs = FilterRefs.from_ss(subss, have_current=True)
+                    if substep == 0:
+                        ss.hist.push(subss.hcur)
+                        self.callback(ss=subss)
+                    sr = self.simple_substep(x, ssampler)
+                    x = sr.x
+                    noise_strength = sr.noise_scale
+                    if noise_strength != 0 and subss.sigma_next != 0:
+                        x = sr.noise_x(ss=subss)
+                    substep += 1
+                    pbar.update(1)
+                    last_down = subss.sigma_next.item()
+                    if subss.idx + substep >= max_idx:
+                        break
+                if subss.idx >= max_idx:
                     break
-            if subss.idx >= max_idx:
-                break
         if last_down is not None and last_down < ss.sigma_next:
             restart_ns = self.restart.get_noise_sampler(ss.noise)
             x += ss.noise.scale_noise(
-                restart_ns(refs=ss.refs),
+                restart_ns(last_down, ss.sigma_next, refs=ss.refs),
                 self.restart.get_noise_scale(last_down, ss.sigma_next),
             )
         pbar.update(0)
@@ -532,7 +500,7 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
 
     def __init__(self, ss, group, **kwargs):
         super().__init__(ss, group, **kwargs)
-        lookahead = self.options.pop("lookahead", {})
+        lookahead = self.options.pop("lookahead", {}).copy()
         self.lookahead_eta = lookahead.pop("eta", 0.0)
         self.lookahead_s_noise = lookahead.pop("s_noise", 1.0)
         self.lookahead_dt_factor = lookahead.pop("dt_factor", 1.0)
@@ -553,36 +521,29 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
         max_idx = len(ss.sigmas) - 1
         eff_substeps = min(max_idx - ss.idx, self.substeps)
         pbar = tqdm.tqdm(total=eff_substeps, initial=0, disable=ss.disable_status)
-        for ssampler in self.samplers:
+        for ssampler_ in self.samplers:
             substeps_remain = eff_substeps - substep
             if substeps_remain == 0:
                 break
-            noise_sampler = ss.noise.make_caching_noise_sampler(
-                ssampler.custom_noise,
-                ssampler.max_noise_samples,
-                ss.sigma,
-                ss.sigma_next,
-                immiscible=fallback(ssampler.immiscible, ss.noise.immiscible),
-            )
-            ssampler.noise_sampler = noise_sampler
-            for subidx in range(min(substeps_remain, ssampler.substeps)):
-                subss.update(ss.idx + substep, substep=substep)
-                pbar.set_description(
-                    f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
-                )
-                subss.hist.push(self.call_model(x, ss=subss))
-                subss.refs = FilterRefs.from_ss(subss, have_current=True)
-                if substep == 0:
-                    self.callback(ss=subss)
-                sr = self.simple_substep(x, ssampler, ss=subss)
-                x = sr.x
-                noise_strength = sr.noise_scale
-                if noise_strength != 0 and subss.sigma_next != 0:
-                    x = sr.noise_x(ss=subss)
-                substep += 1
-                pbar.update(1)
-                if substeps_remain == 1:
-                    break
+            with StepSamplerContext(ssampler_, subss) as ssampler:
+                for subidx in range(min(substeps_remain, ssampler.substeps)):
+                    subss.update(ss.idx + substep, substep=substep)
+                    pbar.set_description(
+                        f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
+                    )
+                    subss.hist.push(self.call_model(x, ss=subss))
+                    subss.refs = FilterRefs.from_ss(subss, have_current=True)
+                    if substep == 0:
+                        self.callback(ss=subss)
+                    sr = self.simple_substep(x, ssampler)
+                    x = sr.x
+                    noise_strength = sr.noise_scale
+                    if noise_strength != 0 and subss.sigma_next != 0:
+                        x = sr.noise_x(ss=subss)
+                    substep += 1
+                    pbar.update(1)
+                    if substeps_remain == 1:
+                        break
         pbar.update(0)
         sigma_down, sigma_up = ss.get_ancestral_step(
             eta=self.lookahead_eta, sigma=ss.sigma, sigma_next=ss.sigma_next
@@ -605,8 +566,10 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
             ss.sigma_next,
             immiscible=fallback(self.immiscible, ss.noise.immiscible),
         )
+        # FIXME: This sigma, sigma_next is probably wrong.
         x += ss.noise.scale_noise(
-            noise_sampler(refs=ss.refs), sigma_up * self.lookahead_s_noise
+            noise_sampler(ss.sigma, ss.sigma_next, refs=ss.refs),
+            sigma_up * self.lookahead_s_noise,
         )
         return x
 

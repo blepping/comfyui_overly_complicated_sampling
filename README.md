@@ -27,8 +27,9 @@ _Note for Flux users_: Set `cfg1_uncond_optimization: true` in the `model` block
 I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
 
 * Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
-* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4 and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4, RKF45, dynamic RK(4) and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
 * TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
+* Distance sampler based on implementation from https://github.com/Extraltodeus/DistanceSampler
 * IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
 * Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
 * Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and idea for sampling with it from https://github.com/Clybius
@@ -345,34 +346,37 @@ post_filter: null
 
 In alphabetical order.
 
-* `adapter`: Wraps a normal ComfyUI `SAMPLER`. (Attach a `SAMPLER` parameter to the node.)
-* `bogacki`:
-* `deis`: See parameters: `history_limit`
-* `dpmpp_2m_sde`: See parameters: `history_limit`
-* `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`
+* `adapter`: Wraps a normal ComfyUI `SAMPLER`. Attach a `SAMPLER` parameter to the node. Note: Samplers that do unusual stuff like try to manipulate the model won't work. ComfyUI's built-in CFG++ samplers in particular do not work here.
+* `bogacki`: Bogacki-Shampine sampler. Also has a reversible variant.
+* `deis`: See parameters: `history_limit`. Does not work well with ETA, I don't recommending leaving ETA at the default 1.
+* `distance`: See parameters: `distance`. Adaptive-ish/configurable step variant of Heun. Taken from: https://github.com/Extraltodeus/DistanceSampler
+* `dpmpp_2m_sde`: See parameters: `history_limit`.
+* `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`.
 * `dpmpp_2s`
-* `dpmpp_3m_sde`: See parameters: `history_limit`
+* `dpmpp_3m_sde`: See parameters: `history_limit`.
 * `dpmpp_sde`
 * `dynamic`: Advanced step method that allows using an expression to determine the sampler parameters at each substep. See below for a more detailed explanation.
-* `euler_cycle`: See parameters: `cycle_pct`
-* `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`
-* `euler`:
-* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`
+* `euler_cycle`: See parameters: `cycle_pct`.
+* `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`.
+* `euler`: If samplers came in vanilla.
+* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`.
 * `heun_1s`: Alternate Heun one step implementation. Supports reversible parameters.
-* `heunpp`: See parameters: `max_order`
-* `ipndm_v`: See parameters: `history_limit`
-* `ipndm`: See parameters: `history_limit`
-* `res`
-* `reversible_bogacki`:
-* `reversible_heun`:
-* `reversible_heun_1s`: See parameters: `history_limit`
-* `rk4`:
+* `heunpp`: See parameters: `max_order`.
+* `ipndm_v`: See parameters: `history_limit`.
+* `ipndm`: See parameters: `history_limit`.
+* `res`: Refined Exponential Solver. I believe this is a variant of Heun. Generally works very well.
+* `reversible_bogacki`: Reversible variant of Bockacki-Shampine.
+* `reversible_heun`: Reversible variant of Heun.
+* `reversible_heun_1s`: Reversible variant of Heun 1 step. See parameters: `history_limit`.
+* `rk4`: Range-Kutta 4th order sampler.
+* `rkf45`: 5 model call flavor of RK.
+* `rk_dynamic`: Variant of RK4 that lets you set `max_order` (you can also set it to `0` to choose an order dynamically, doesn't seem to work so well though).
 * `solver_diffrax`: Uses the [Diffrax](https://github.com/patrick-kidger/diffrax) solver backend. See `de_*` parameters below.
 * `solver_torchdiffeq`: Uses the [torchdiffeq](https://github.com/rtqichen/torchdiffeq) backend. See `de_*` parameters below.
 * `solver_torchode`: Uses the [torchode]((https://github.com/martenlienen/torchode)) backend. See `de_*` parameters below.
 * `solver_torchsde`: Uses the [torchsde](https://github.com/google-research/torchsde) backend. See `de_*` parameters below.
 * `trapezoidal`:
-* `trapezoidal_cycle`: See parameters: `cycle_pct`
+* `trapezoidal_cycle`: See parameters: `cycle_pct`.
 * `ttm_jvp`: TTM is a weird sampler. If you're using model caching you must make sure the entries TTM uses are populated first (by having it run before any other samplers that call the model multiple times). It may also not work with some other model patches and upscale methods. See parameters: `alternate_phi_2_calc`
 
 **Sampler Feature Support**
@@ -382,6 +386,7 @@ In alphabetical order.
 |`adapter`|?|?|?|?|?|
 |`bogacki`|2|||||
 |`deis`|1|1-3 (1)||||
+|`distance`|variable|||||
 |`dpmpp_2m_sde`|1|1||||
 |`dpmpp_2m`|1|1||||
 |`dpmpp_2s`|2|||||
@@ -401,6 +406,8 @@ In alphabetical order.
 |`reversible_heun`|2|||X||
 |`reversible_heun_1s`|1|1||X||
 |`rk4`|4|||||
+|`rkf45`|5|||||
+|`rk4`|1-4|||||
 |`solver_diffrax`|variable|||||
 |`solver_torchdiffeq`|variable|||||
 |`solver_torchode`|variable|||||
@@ -472,6 +479,13 @@ s_noise: 1.0
 
 # ETA (basically ancestralness).
 eta: 1.0
+
+# If the ETA calculation fails, it will retry with eta - eta_retry_increment until it either
+# succeeds or eta becomes <= 0 (in which case ancestralness just gets disabled).
+# In other words, you can set ETA as high as you want, set eta_retry_increment to something like 0.1 and
+# it will just do whatever it takes to find an ETA that works.
+eta_retry_increment: 0
+
 # No effect unless both start and end are set. Will scale the eta value based on the
 # percentage of sampling. In other words, eta*dyn_eta_start at the beginning,
 # eta*dyn_eta_end at the end.
@@ -596,6 +610,8 @@ history_limit: 999 # Varies based on sampler.
 
 # Used for some samplers with variable order. List of samplers and default value below:
 #   heunpp2: 3
+#   rk_dynamic: 4 - Can also be set to 0 to try to dynamically adjust the order based on calculated
+#                   error from the last step (but that may not work well).
 max_order: 999 # Varies based on sampler.
 
 # Used for dpmpp_2m. One of midpoint, heun
