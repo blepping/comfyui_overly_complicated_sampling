@@ -264,13 +264,9 @@ class SingleStepSampler:
         ss = self.ss
         sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
         d = self.to_d(ss.hcur)
-        return (
-            yield from self.result(
-                ss.denoised + d * sigma_down,
-                sigma_up,
-                sigma_down=sigma_down,
-            )
-        )
+        dt = sigma_down - ss.sigma
+        x = ss.denoised + d * sigma_down if self.cfgpp else x + d * dt
+        return (yield from self.result(x, sigma_up, sigma_down=sigma_down))
 
     def denoised_result(self, **kwargs):
         ss = self.ss
@@ -990,9 +986,9 @@ class RKDynamicStep(SingleStepSampler):
         k = [d * dt]
         curr_weight = self.rk_weights[order - 1]
 
-        print(
-            f"\nRK: weight={curr_weight!r}, histlen={len(ss.hist)}, order={order} ({self.max_order}), err={error:.6}\n"
-        )
+        # print(
+        #     f"\nRK: weight={curr_weight!r}, histlen={len(ss.hist)}, order={order} ({self.max_order}), err={error:.6}\n"
+        # )
         for j in range(1, order):
             # Calculate intermediate k values based on the current order
             k_sum = sum(curr_weight[i] * k[i] for i in range(j))
