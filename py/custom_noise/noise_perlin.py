@@ -114,7 +114,7 @@ def rand_perlin(
     shape_slices = tuple(slice(0, shape[i]) for i in didxs)
 
     def tile_grads(slices):
-        result = gradients[*(slice(*slices[i]) for i in didxs)]
+        result = gradients[tuple(slice(*slices[i]) for i in didxs)]
         for i in didxs:
             result = result.repeat_interleave(d[i], i)
         return result
