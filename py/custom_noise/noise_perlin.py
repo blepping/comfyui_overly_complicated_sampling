@@ -121,7 +121,9 @@ def rand_perlin(
 
     def dot(grad, shift):
         return (
-            torch.stack(tuple(grid[*shape_slices, i] + shift[i] for i in didxs), dim=-1)
+            torch.stack(
+                tuple(grid[(*shape_slices, i)] + shift[i] for i in didxs), dim=-1
+            )
             * grad[shape_slices]
         ).sum(dim=-1)
 
