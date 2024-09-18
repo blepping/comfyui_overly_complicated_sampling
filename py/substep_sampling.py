@@ -156,6 +156,14 @@ class SamplerState:
         return self.hcur.denoised
 
     @property
+    def denoised_uncond(self):
+        return self.hcur.denoised_uncond
+
+    @property
+    def denoised_cond(self):
+        return self.hcur.denoised_cond
+
+    @property
     def dt(self):
         return self.sigma_next - self.sigma
 

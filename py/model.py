@@ -72,6 +72,33 @@ class ModelResult:
             x = x - denoised * alt_cfgpp_scale + denoised_uncond * alt_cfgpp_scale
         return to_d(x, sigma, denoised if not cfgpp else denoised_uncond)
 
+    def get_split_prediction(
+        self,
+        *,
+        x=None,
+        d=None,
+        sigma=None,
+        denoised=None,
+        denoised_uncond=None,
+        alt_cfgpp_scale=0,
+        cfgpp=False,
+    ):
+        denoised = fallback(denoised, self.denoised)
+        denoised_uncond = fallback(denoised_uncond, self.denoised_uncond)
+        x = fallback(x, self.x)
+        sigma = fallback(sigma, self.sigma)
+        if d is None:
+            d = self.to_d(
+                x=x,
+                sigma=sigma,
+                denoised=denoised,
+                denoised_uncond=denoised_uncond,
+                alt_cfgpp_scale=alt_cfgpp_scale,
+                cfgpp=cfgpp,
+            )
+        denoised_pred = denoised if alt_cfgpp_scale == 0 else x - d * sigma
+        return (denoised_pred, d)
+
     @property
     def d(self):
         return self.to_d()

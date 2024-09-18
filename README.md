@@ -368,7 +368,7 @@ In alphabetical order.
 * `reversible_bogacki`: Reversible variant of Bockacki-Shampine.
 * `reversible_heun`: Reversible variant of Heun.
 * `reversible_heun_1s`: Reversible variant of Heun 1 step. See parameters: `history_limit`.
-* `rk4`: Range-Kutta 4th order sampler.
+* `rk4`: Runge-Kutta 4th order sampler.
 * `rkf45`: 5 model call flavor of RK.
 * `rk_dynamic`: Variant of RK4 that lets you set `max_order` (you can also set it to `0` to choose an order dynamically, doesn't seem to work so well though).
 * `solver_diffrax`: Uses the [Diffrax](https://github.com/patrick-kidger/diffrax) solver backend. See `de_*` parameters below.

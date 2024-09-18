@@ -174,13 +174,15 @@ class SingleStepSampler:
     allow_cfgpp = False
     allow_alt_cfgpp = False
 
+    default_eta = 1.0
+
     def __init__(
         self,
         *,
         noise_sampler=None,
         substeps=1,
         s_noise=1.0,
-        eta=1.0,
+        eta=None,
         eta_retry_increment=0,
         dyn_eta_start=None,
         dyn_eta_end=None,
@@ -196,7 +198,7 @@ class SingleStepSampler:
         alt_cfgpp_scale = self.options.pop("alt_cfgpp_scale", 0.0)
         self.alt_cfgpp_scale = 0.0 if not self.allow_alt_cfgpp else alt_cfgpp_scale
         self.s_noise = s_noise
-        self.eta = eta
+        self.eta = fallback(eta, self.default_eta)
         self.eta_retry_increment = eta_retry_increment
         self.dyn_eta_start = dyn_eta_start
         self.dyn_eta_end = dyn_eta_end
@@ -260,13 +262,28 @@ class SingleStepSampler:
         self.noise_sampler = None
 
     # Euler - based on original ComfyUI implementation
-    def euler_step(self, x):
-        ss = self.ss
-        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
-        d = self.to_d(ss.hcur)
-        dt = sigma_down - ss.sigma
-        x = ss.denoised + d * sigma_down if self.cfgpp else x + d * dt
-        return (yield from self.result(x, sigma_up, sigma_down=sigma_down))
+    def euler_step(
+        self,
+        x,
+        *,
+        sigma_down=None,
+        sigma_up=None,
+        eta=None,
+        sigma=None,
+        sigma_next=None,
+    ):
+        eta = fallback(eta, self.get_dyn_eta())
+        if sigma_down is None or sigma_up is None:
+            if not (sigma_down is None and sigma_up is None):
+                raise ValueError("Must pass both sigma_down and sigma_up or neither")
+            sigma_down, sigma_up = self.get_ancestral_step(
+                eta=eta, sigma=sigma, sigma_next=sigma_next
+            )
+        return (
+            yield from self.split_result(
+                *self.get_split_prediction(), sigma_down=sigma_down, sigma_up=sigma_up
+            )
+        )
 
     def denoised_result(self, **kwargs):
         ss = self.ss
@@ -278,24 +295,29 @@ class SingleStepSampler:
         return (yield SamplerResult(self.ss, self, x, noise_scale, **kwargs))
 
     def split_result(
-        self, denoised, noise_pred, sigma_up=None, sigma_down=None, **kwargs
+        self, denoised=None, noise_pred=None, sigma_up=None, sigma_down=None, **kwargs
     ):
         return (
             yield SamplerResult(
-                self.ss,
-                self,
-                None,
-                sigma_up,
+                ss=self.ss,
+                sampler=self,
+                x=None,
+                sigma_up=sigma_up,
                 sigma_down=sigma_down,
                 split_result=(denoised, noise_pred),
                 **kwargs,
             )
         )
 
-    def get_ancestral_step(self, *args, **kwargs):
-        return self.ss.get_ancestral_step(
+    def get_ancestral_step(self, *args, dyn_eta=False, as_dict=False, **kwargs):
+        if dyn_eta:
+            args = (self.get_dyn_eta(), *args)
+        sigma_down, sigma_up = self.ss.get_ancestral_step(
             *args, retry_increment=self.eta_retry_increment, **kwargs
         )
+        if not as_dict:
+            return sigma_down, sigma_up
+        return {"sigma_down": sigma_down, "sigma_up": sigma_up}
 
     def ancestralize_result(self, sr):
         ss = self.ss
@@ -341,6 +363,16 @@ class SingleStepSampler:
     def to_d(self, mr, **kwargs):
         return mr.to_d(alt_cfgpp_scale=self.alt_cfgpp_scale, cfgpp=self.cfgpp, **kwargs)
 
+    def get_split_prediction(self, *, mr=None, sigma=None, **kwargs):
+        mr = fallback(mr, self.ss.hcur)
+        sigma = fallback(sigma, mr.sigma)
+        return mr.get_split_prediction(
+            sigma=sigma,
+            alt_cfgpp_scale=self.alt_cfgpp_scale,
+            cfgpp=self.cfgpp,
+            **kwargs,
+        )
+
     def call_model(self, *args, **kwargs):
         ss = self.ss
         kwargs["require_uncond"] = self.require_uncond or kwargs.get(
@@ -373,19 +405,24 @@ class HistorySingleStepSampler(SingleStepSampler):
 
 
 class ReversibleSingleStepSampler(HistorySingleStepSampler):
+    default_reversible_scale = 1.0
+    default_reta = 1.0
+
     def __init__(
         self,
         *,
-        reversible_scale=1.0,
-        reta=1.0,
+        reversible_scale=None,
+        reta=None,
         dyn_reta_start=None,
         dyn_reta_end=None,
         reversible_start_step=0,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.reversible_scale = reversible_scale
-        self.reta = reta
+        self.reversible_scale = fallback(
+            reversible_scale, self.default_reversible_scale
+        )
+        self.reta = fallback(reta, self.default_reta)
         self.reversible_start_step = reversible_start_step
         self.dyn_reta_start = dyn_reta_start
         self.dyn_reta_end = dyn_reta_end
@@ -445,6 +482,8 @@ class EulerStep(SingleStepSampler):
 
 
 class CycleSingleStepSampler(SingleStepSampler):
+    default_eta = 0.0
+
     def __init__(self, *, cycle_pct=0.25, **kwargs):
         super().__init__(**kwargs)
         if cycle_pct < 0:
@@ -452,8 +491,8 @@ class CycleSingleStepSampler(SingleStepSampler):
         self.cycle_pct = cycle_pct
 
     def get_cycle_scales(self, sigma_next):
-        keep_scale = sigma_next * (1.0 - self.cycle_pct) if self.cycle_pct < 1 else 0.0
-        add_scale = ((sigma_next**2.0 - keep_scale**2.0) ** 0.5) * (
+        keep_scale = 1 - self.cycle_pct
+        add_scale = ((sigma_next**2.0 - (keep_scale * sigma_next) ** 2.0) ** 0.5) * (
             0.95 + 0.25 * self.cycle_pct
         )
         # print(f">> keep={keep_scale}, add={add_scale}")
@@ -466,18 +505,21 @@ class EulerCycleStep(CycleSingleStepSampler):
     allow_cfgpp = True
 
     def step(self, x):
-        ss = self.ss
-        if ss.sigma_next == 0:
-            return (yield from self.denoised_result())
-        keep_scale, add_scale = self.get_cycle_scales(ss.sigma_next)
-        keep_noise = self.to_d(ss.hcur) * keep_scale if keep_scale > 0 else 0.0
-        yield from self.result(ss.denoised + keep_noise, add_scale)
+        sigma_next = self.ss.sigma_next
+        denoised_pred, d = self.get_split_prediction()
+        keep_scale, add_scale = self.get_cycle_scales(sigma_next)
+        return (
+            yield from self.split_result(
+                denoised_pred, d * keep_scale, sigma_up=add_scale, sigma_down=sigma_next
+            )
+        )
 
 
 class DPMPP2MStep(HistorySingleStepSampler, DPMPPStepMixin):
     name = "dpmpp_2m"
     default_history_limit, max_history = 1, 1
     ancestralize = True
+    default_eta = 0.0
 
     def step(self, x):
         ss = self.ss
@@ -575,39 +617,216 @@ class DPMPP3MSDEStep(HistorySingleStepSampler):
 
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+# Apparently the only difference between Heun and Trapezoidal is the first step using ETA or not.
 class ReversibleHeunStep(ReversibleSingleStepSampler):
     name = "reversible_heun"
     model_calls = 1
     allow_alt_cfgpp = True
     allow_cfgpp = True
+    trapezoidal_mode = False
 
-    def step(self, xs):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.blend = filtering.BLENDING_MODES[self.options.get("blend_mode", "lerp")]
+
+    def step_altcfgpp(self, x):
+        ss, pp = self.ss, self.alt_cfgpp_scale
+
+        def alt_cfgpp_mix(denoised, uncond):
+            return denoised * (1 + pp) - uncond * pp
+
+        sigma, _sigma_next = ss.sigma, ss.sigma_next
+        denoised, uncond = ss.denoised, ss.denoised_uncond
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+        # reta, reversible_scale = self.get_reversible_cfg()
+        # sigma_down_reversible, _sigma_up_reversible = self.get_ancestral_step(reta)
+        # dt_reversible = sigma_down_reversible - ss.sigma
+        ratio = sigma_down / sigma
+        dratio = 1 - (sigma / sigma_down) * 0.5
+        x_next = self.blend(alt_cfgpp_mix(denoised, uncond), x, ratio)
+        mr_next = self.call_model(x_next, sigma_down, call_index=1)
+        denoised_prime = self.blend(mr_next.denoised, denoised, dratio)
+        uncond_prime = self.blend(mr_next.denoised_uncond, uncond, dratio)
+        x = self.blend(alt_cfgpp_mix(denoised_prime, uncond_prime), x, ratio)
+        yield from self.result(x, sigma_up)
+
+    def step_cfgpp(self, x):
         ss = self.ss
+        sigma, _sigma_next = ss.sigma, ss.sigma_next
+        denoised, uncond = ss.denoised, ss.denoised_uncond
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+        # reta, reversible_scale = self.get_reversible_cfg()
+        # sigma_down_reversible, _sigma_up_reversible = self.get_ancestral_step(reta)
+        # dt_reversible = sigma_down_reversible - ss.sigma
+        ratio = sigma_down / sigma
+        dratio = 1 - (sigma / sigma_down) * 0.5
+        x_next = denoised + (x - uncond) * ratio
+        mr_next = self.call_model(x_next, sigma_down, call_index=1)
+        denoised_prime = self.blend(mr_next.denoised, denoised, dratio)
+        uncond_adj = uncond + mr_next.denoised_uncond * (1 - dratio)
+        x = denoised_prime + denoised * 0.5 + (x - uncond_adj) * ratio
+        yield from self.result(x, sigma_up)
+
+    def step(self, x):
+        if self.cfgpp:
+            return (yield from self.step_cfgpp(x))
+        if self.alt_cfgpp_scale != 0:
+            return (yield from self.step_altcfgpp(x))
+        ss = self.ss
+        sigma, _sigma_next, denoised = ss.sigma, ss.sigma_next, ss.denoised
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+        # reta, reversible_scale = self.get_reversible_cfg()
+        # sigma_down_reversible, _sigma_up_reversible = self.get_ancestral_step(reta)
+        # dt_reversible = sigma_down_reversible - ss.sigma
+        ratio = sigma_down / sigma
+        dratio = 1 - (sigma / sigma_down) * 0.5
+        x_next = self.blend(denoised, x, ratio)
+        mr_next = self.call_model(x_next, sigma_down, call_index=1)
+        denoised_prime = self.blend(mr_next.denoised, denoised, dratio)
+        x = self.blend(denoised_prime, x, ratio)
+        yield from self.result(x, sigma_up)
+
+    # def step(self, x):
+    #     if self.cfgpp:
+    #         return (yield from self.step_cfgpp(x))
+    #     ss = self.ss
+    #     sigma, sigma_next, denoised = ss.sigma, ss.sigma_next, ss.denoised
+    #     sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+    #     reta, reversible_scale = self.get_reversible_cfg()
+    #     sigma_down_reversible, _sigma_up_reversible = self.get_ancestral_step(reta)
+    #     dt_reversible = sigma_down_reversible - ss.sigma
+    #     ratio = sigma_down / sigma
+    #     iratio = 1 - ratio
+    #     dratio = 1 - (sigma / sigma_down) * 0.5
+    #     x_next = denoised + (x - denoised) * (sigma_next / sigma)
+    #     # x_next = denoised * iratio + x * ratio
+    #     # if sigma_down < sigma_next:
+    #     #     x_next = yield from self.result(
+    #     #         x_next,
+    #     #         sigma_up,
+    #     #         sigma=sigma,
+    #     #         sigma_down=sigma_down,
+    #     #         final=False,
+    #     #     )
+    #     # yield from self.result(x_next, sigma_up * 0)
+    #     # return
+    #     mr_next = self.call_model(x_next, sigma_next, call_index=1)
+    #     # yield from self.result(mr_next.denoised * iratio + x_next * ratio, sigma_up)
+    #     # return
+    #     denoised_prime = (denoised * dratio) + (mr_next.denoised * (1 - dratio))
+    #     x = denoised_prime * iratio + x * ratio
+    #     yield from self.result(x, sigma_up)
+
+    def stepz(self, x):
+        ss = self.ss
+        sigma, sigma_next, denoised = ss.sigma, ss.sigma_next, ss.denoised
+        ratio = sigma_next / sigma
+        iratio = 1 - ratio
+        x_next = denoised * iratio + x * ratio
+        mr_next = self.call_model(x_next, sigma_next, call_index=1)
+        x = (denoised + mr_next.denoised) * (iratio / 2) + x * ratio
+        # x = (denoised * ratio + mr_next.denoised * iratio) * iratio + x * ratio
+        # denoised_next = mr_next.denoised * (sigma / sigma_next)
+        # x = (denoised * ratio + denoised_next * iratio) * iratio + x * ratio
+        yield from self.result(x, sigma * 0.0)
+
+    # def step(self, x):
+    #     ss = self.ss
+    #     sigma, sigma_next, denoised = ss.sigma, ss.sigma_next, ss.denoised
+    #     ratio = sigma_next / sigma
+    #     iratio = 1 - ratio
+    #     x_next = denoised * iratio + x * ratio
+    #     mr_next = self.call_model(x_next, sigma_next, call_index=1)
+    #     w = 2 * ss.sigmas[0]
+    #     w2 = sigma_next / w
+    #     w1 = 1 - w2
+    #     print("\n>>", w, w1, w2, ratio, iratio)
+    #     x = (denoised * w1 + mr_next.denoised * w2) * iratio + x * ratio
+    #     yield from self.result(x, sigma * 0.0)
+
+    # def step(self, x):
+    #     ss = self.ss
+    #     sigma, sigma_next, denoised = ss.sigma, ss.sigma_next, ss.denoised
+    #     ratio = sigma_next / sigma
+    #     iratio = 1 - ratio
+    #     x_next = denoised * iratio + x * ratio
+    #     mr_next = self.call_model(x_next, sigma_next, call_index=1)
+    #     x = (denoised + mr_next.denoised) * (iratio / 2) + x * ratio
+    #     yield from self.result(x, sigma * 0.0)
+
+    def step__(self, x):
+        ss = self.ss
+        sigma, sigma_next, denoised = ss.sigma, ss.sigma_next, ss.denoised
+        uncond = ss.denoised_uncond
+        ratio = sigma_next / sigma
+        iratio = 1 - ratio
+        print(f">>> ratio={ratio:.4}, iratio={iratio:.4}")
+        if self.cfgpp:
+            x = denoised + (x - uncond) * ratio
+        elif self.alt_cfgpp_scale != 0:
+            alt_scale = self.alt_cfgpp_scale
+            x = (denoised * (1 + alt_scale) - uncond * alt_scale) * iratio + x * ratio
+        else:
+            x = denoised * iratio + x * ratio
+        yield from self.result(x, sigma * 0.0)
+
+    def step_(self, x):
+        ss = self.ss
+        sigma_next = ss.sigma_next
         sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
         reta, reversible_scale = self.get_reversible_cfg()
         sigma_down_reversible, _sigma_up_reversible = self.get_ancestral_step(reta)
         dt_reversible = sigma_down_reversible - ss.sigma
-
-        # Calculate the derivative using the model
-        d = self.to_d(ss.hcur)
+        print("\n>>>", sigma_up, sigma_next, sigma_down)
 
         # Predict the sample at the next sigma using Euler step
-        x_pred = ss.denoised + d * sigma_down
+        euler_sr = next(
+            self.euler_step(
+                x,
+                sigma_down=sigma_next if self.trapezoidal_mode else sigma_down,
+                sigma_up=0,
+            )
+        )
+        # yield from self.result(euler_sr.x)
+        # return
+        d = euler_sr.noise_pred
+        # d = to_d(x, ss.sigma, euler_sr.denoised)
+        # yield from self.split_result(
+        #     euler_sr.denoised,
+        #     d,
+        #     sigma_up=sigma_up,
+        #     sigma_down=sigma_down,
+        # )
+        # return
 
         # Denoised sample at the next sigma
-        mr_next = self.call_model(x_pred, sigma_down, call_index=1)
+        mr_next = self.call_model(euler_sr.x, euler_sr.sigma_down, call_index=1)
 
-        # Calculate the derivative at the next sigma
-        d_next = self.to_d(mr_next)
-
-        # Update the sample using the Reversible Heun formula
-        correction = dt_reversible**2 * (d_next - d) / 4
-        x = (
-            mr_next.denoised
-            + (sigma_down * (d + d_next) / 2)
-            - correction * reversible_scale
+        denoised_pred_next, d_next = self.get_split_prediction(mr=mr_next)
+        derp = euler_sr.x - euler_sr.noise_pred * euler_sr.sigma_down
+        # yield from self.result(x + ((d + d_next) / 2) * (sigma_down - ss.sigma))
+        print("\n::", torch.allclose(ss.denoised, derp))
+        yield from self.result(
+            ((mr_next.denoised + derp) / 2) + ((d + d_next) / 2) * sigma_down
         )
-        yield from self.result(x, sigma_up, sigma_down=sigma_down)
+        return
+        yield from self.split_result(
+            euler_sr.denoised,
+            d_next,
+            sigma_up=sigma_up,
+            sigma_down=sigma_down,
+        )
+        return
+        if reversible_scale != 0:
+            denoised_pred_next -= (dt_reversible**2 * (d_next - d) / 4).mul_(
+                reversible_scale
+            )
+        yield from self.split_result(
+            denoised_pred_next,
+            d.add_(d_next).mul_(0.5),
+            sigma_up=sigma_up,
+            sigma_down=sigma_down,
+        )
 
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
@@ -622,118 +841,34 @@ class ReversibleHeun1SStep(ReversibleSingleStepSampler):
         if self.available_history() < 1:
             return (yield from ReversibleHeunStep.step(self, x))
         ss = self.ss
-        s = ss.sigma
-        # Reversible Heun-inspired update (first-order)
-        sd, su = self.get_ancestral_step(self.get_dyn_eta())
+        sigma_next = ss.sigma_next
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
         reta, reversible_scale = self.get_reversible_cfg()
-        sdr, _sur = self.get_ancestral_step(reta)
-        dt, dtr = sd - s, sdr - s
-        # eff_x = ss.hist[-1].x if ah > 0 else x
-        eff_x = x
-
-        # Calculate the derivative using the model
-        # d_prev = self.to_d(
-        #     ss.hist[-2] if ah > 0 else ss.hist[-1],
-        #     x=eff_x,
-        #     sigma=s,
-        # )
-        prev_mr = ss.hist[-2]
-
-        # d_prev = self.to_d(prev_mr, x=eff_x, sigma=s)
-        d_prev = self.to_d(prev_mr, sigma=ss.sigma_prev)
+        sigma_down_reversible, _sigma_up_reversible = self.get_ancestral_step(reta)
+        dt_reversible = sigma_down_reversible - ss.sigma
 
         # Predict the sample at the next sigma using Euler step
-        # x_pred = ss.denoised + d_prev * sd
-        x_pred = eff_x + d_prev * dt
-        # x_pred = ss.denoised + d_prev * sd
+        denoised_pred_prev, d_prev = ss.hprev.get_split_prediction(
+            x=x, cfgpp=self.cfgpp, alt_cfgpp_scale=self.alt_cfgpp_scale
+        )
+        x_pred = denoised_pred_prev + d_prev * ss.sigma
+        # euler_sr = next(self.euler_step(x, sigma_down=sigma_next, sigma_up=0))
+        # d = euler_sr.noise_pred
 
-        # Calculate the derivative at the next sigma
-        d_next = self.to_d(ss.hcur, x=x_pred, sigma=sd)
+        # Denoised sample at the next sigma
+        # mr_next = self.call_model(x_pred, sigma_next, call_index=1)
 
-        # Update the sample using the Reversible Heun formula
-        correction = dtr**2 * (d_next - d_prev) / 4
-        x = x + (dt * (d_prev + d_next) / 2) - correction * reversible_scale
-        yield from self.result(x, su, sigma_down=sd)
-
-    # def __step(self, x, ss):
-    #     if ss.sigma_next == 0:
-    #         return self.euler_step(x, ss)
-    #     # Reversible Heun-inspired update (first-order)
-    #     sigma_down, sigma_up = ss.get_ancestral_step(self.get_dyn_eta(ss))
-    #     sigma_down_reversible, sigma_up_reversible = ss.get_ancestral_step(
-    #         self.get_dyn_reta(ss)
-    #     )
-    #     sigma_i, sigma_i_plus_1 = ss.sigma, sigma_down
-    #     dt = sigma_i_plus_1 - sigma_i
-    #     dt_reversible = sigma_down_reversible - sigma_i
-
-    #     eff_x = ss.hist[-2 if len(ss.hist) > 1 else -1].x
-    #     # eff_x = ss.hist[-2].x if len(ss.hist) > 1 else x
-
-    #     # Calculate the derivative using the model
-    #     eff_mr = ss.hprev if len(ss.hist) > 1 else ss.hcur
-    #     d_i_old = self.to_d(eff_mr)
-    #     # d_i_old = self.to_d(ss.hprev if len(ss.hist) > 1 else ss.hcur)
-    #     # d_i_old = to_d(
-    #     #     eff_x,
-    #     #     sigma_i if len(ss.hist) == 1 else ss.sigma_prev,
-    #     #     ss.hist[-2].denoised
-    #     #     if len(ss.hist) > 1
-    #     #     else ss.model(eff_x, sigma_i, ss=ss,call_index=1).denoised,
-    #     # )
-
-    #     # Predict the sample at the next sigma using Euler step
-    #     x_pred = eff_x + d_i_old * dt
-
-    #     # Calculate the derivative at the next sigma
-    #     d_i_plus_1 = to_d(x_pred, sigma_i_plus_1, ss.denoised)
-
-    #     # Update the sample using the Reversible Heun formula
-    #     x = (
-    #         x
-    #         + dt * (d_i_old + d_i_plus_1) / 2
-    #         - dt_reversible**2 * (d_i_plus_1 - d_i_old) / 4
-    #     )
-    #     yield from self.result(ss, x, sigma_up)
-    #     # return x, sigma_up
-
-    # def _step(self, x, ss):
-    #     if ss.sigma_next == 0:
-    #         return (yield from self.euler_step(x, ss))
-    #     ah = self.available_history(ss)
-    #     s = ss.sigma
-    #     # Reversible Heun-inspired update (first-order)
-    #     sd, su = ss.get_ancestral_step(self.get_dyn_eta(ss))
-    #     sdr, _sur = ss.get_ancestral_step(self.get_dyn_reta(ss))
-    #     dt, dtr = sd - s, sdr - s
-    #     # eff_mr = ss.hprev if ah > 0 else ss.hcur
-    #     # eff_x = ss.hist[-1].x if ah > 0 else x  # This probably doesn't make sense.
-
-    #     # Calculate the derivative using the model
-    #     # mr_prev = ss.hist[-2] if ah > 0 else ss.model(eff_x, s, ss=ss,call_index=1)
-    #     mr_prev = ss.hist[-2 if ah > 0 else -1]
-    #     d_prev = self.to_d(mr_prev, x=x, sigma=ss.sigma)
-    #     # d_prev = self.to_d(
-    #     #     mr_prev, sigma=ss.sigma_prev if ss.sigma_prev is not None else ss.sigma
-    #     # )
-
-    #     # Predict the sample at the next sigma using Euler step
-    #     x_pred = ss.denoised + d_prev * sd
-    #     # x_pred = mr_prev.denoised + d_prev * sd
-    #     # x_pred = eff_x + d_prev * dt
-
-    #     # Calculate the derivative at the next sigma
-    #     d_next = self.to_d(ss.hcur, x=x_pred, sigma=sd)
-
-    #     # Update the sample using the Reversible Heun formula
-    #     correction = dtr**2 * (d_next - d_prev) / 4
-    #     # x = x + (dt * (d_prev + d_next) / 2) - correction * self.reversible_scale
-    #     x = (
-    #         ss.denoised
-    #         + (sd * (d_prev + d_next) / 2)
-    #         - correction * self.reversible_scale
-    #     )
-    #     yield from self.result(ss, x, su)
+        # denoised_pred_next, d_next = self.get_split_prediction(mr=mr_next)
+        denoised_pred_next, d_next = ss.hcur.get_split_prediction(
+            x=x_pred, cfgpp=self.cfgpp, alt_cfgpp_scale=self.alt_cfgpp_scale
+        )
+        correction = dt_reversible**2 * (d_next - d_prev) / 4
+        yield from self.split_result(
+            denoised_pred_next - correction * reversible_scale,
+            (d_prev + d_next) * 0.5,
+            sigma_up=sigma_up,
+            sigma_down=sigma_down,
+        )
 
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
@@ -777,13 +912,38 @@ class RESStep(SingleStepSampler):
         yield from self.result(x, sigma_up, sigma_down=sigma_down)
 
 
+class TrapezoidalStep(ReversibleHeunStep):
+    reversible = False
+    trapezoidal_mode = True
+
+
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-class TrapezoidalStep(SingleStepSampler):
+class TrapezoidalStep_(SingleStepSampler):
     name = "trapezoidal"
     model_calls = 1
     allow_alt_cfgpp = True
 
     def step(self, x):
+        ss = self.ss
+        sigma_next = ss.sigma_next
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+
+        # Predict the sample at the next sigma using Euler step
+        euler_sr = next(self.euler_step(x, sigma_down=sigma_next, sigma_up=0))
+        d = euler_sr.noise_pred
+
+        # Denoised sample at the next sigma
+        mr_next = self.call_model(euler_sr.x, euler_sr.sigma_down, call_index=1)
+
+        denoised_pred_next, d_next = self.get_split_prediction(mr=mr_next)
+        yield from self.split_result(
+            denoised_pred_next,
+            (d + d_next) * 0.5,
+            sigma_up=sigma_up,
+            sigma_down=sigma_down,
+        )
+
+    def step_(self, x):
         ss = self.ss
         sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
 
@@ -1341,6 +1501,7 @@ class IPNDMStep(HistorySingleStepSampler):
     ancestralize = True
     default_history_limit, max_history = 1, 3
     allow_alt_cfgpp = True
+    default_eta = 0.0
 
     IPNDM_MULTIPLIERS = (
         ((1,), 1),
@@ -1369,6 +1530,7 @@ class IPNDMVStep(HistorySingleStepSampler):
     ancestralize = True
     default_history_limit, max_history = 1, 3
     allow_alt_cfgpp = True
+    default_eta = 0.0
 
     def step(self, x):
         ss = self.ss
@@ -1452,6 +1614,7 @@ class DEISStep(HistorySingleStepSampler):
     ancestralize = True
     default_history_limit, max_history = 1, 3
     allow_alt_cfgpp = True
+    default_eta = 0.0
 
     def __init__(self, *args, deis_mode="tab", **kwargs):
         super().__init__(*args, **kwargs)
@@ -1533,6 +1696,7 @@ class HeunPP2Step(SingleStepSampler):
 class DESolverStep(SingleStepSampler, MinSigmaStepMixin):
     de_default_solver = None
     sample_sigma_zero = True
+    default_eta = 0.0
 
     def __init__(
         self,
@@ -1587,6 +1751,7 @@ class TDEStep(DESolverStep):
     allow_alt_cfgpp = True
     allow_cfgpp = False
     de_default_solver = "rk4"
+    default_eta = 0.0
 
     def __init__(
         self,
@@ -1687,6 +1852,7 @@ class TODEStep(DESolverStep):
     model_calls = 2
     allow_alt_cfgpp = True
     de_default_solver = "dopri5"
+    default_eta = 0.0
 
     def __init__(
         self,
@@ -1801,6 +1967,7 @@ class TSDEStep(DESolverStep):
     model_calls = 2
     allow_alt_cfgpp = True
     de_default_solver = "reversible_heun"
+    default_eta = 0.0
 
     def __init__(
         self,
@@ -2000,6 +2167,7 @@ class DiffraxStep(DESolverStep):
     model_calls = 2
     allow_alt_cfgpp = True
     de_default_solver = "dopri5"
+    default_eta = 0.0
 
     def __init__(
         self,
