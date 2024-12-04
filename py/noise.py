@@ -15,15 +15,16 @@ class ImmiscibleNoise(Filter):
         "size": 0,
         "batching": "channel",
         "maximize": False,
+        "distance_scale": 0.0,
+        "distance_scale_ref": None,
     }
 
     def __call__(self, noise_sampler, x_ref, *, refs=None):
-        if not self.check_applies(refs):
+        if self.size == 0 or self.strength == 0 or not self.check_applies(refs):
             return noise_sampler()
+        size = self.size if self.strength == 1.0 else self.size + 1
         return self.apply(
-            torch.cat(tuple(noise_sampler() for _ in range(self.size)))
-            if self.size > 0
-            else noise_sampler(),
+            torch.cat(tuple(noise_sampler() for _ in range(size))),
             default_ref=x_ref,
             refs=refs,
             output_shape=x_ref.shape,
@@ -32,8 +33,10 @@ class ImmiscibleNoise(Filter):
     def filter(self, latent, ref_latent, *, refs, output_shape):
         if self.size == 0:
             return latent
+        offset = 0 if self.strength == 1.0 else output_shape[0]
         return self.unbatch(
-            self.immiscible(self.batch(latent), self.batch(ref_latent)), output_shape
+            self.immiscible(self.batch(latent[offset:]), self.batch(ref_latent)),
+            output_shape,
         )
 
     def batch(self, latent):
@@ -56,27 +59,35 @@ class ImmiscibleNoise(Filter):
         return latent.view(*sz)
 
     # Based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395
-    # Idea from https://github.com/Clybius
+    # Idea for use with inference as well as implementation help from https://github.com/Clybius
     def immiscible(self, latent, ref_latent):
         # "Immiscible Diffusion: Accelerating Diffusion Training with Noise Assignment" (2024) Li et al. arxiv.org/abs/2406.12303
         # Minimize latent-noise pairs over a batch
         n = latent.shape[0]
-        ref_latent_expanded = (
-            ref_latent.half().unsqueeze(1).expand(-1, n, *ref_latent.shape[1:])
-        )
-        latent_expanded = (
-            latent.half().unsqueeze(0).expand(ref_latent.shape[0], *latent.shape)
-        )
-        dist = (ref_latent_expanded - latent_expanded) ** 2
-        dist = dist.mean(list(range(2, dist.dim()))).cpu()
+        ref_latent = ref_latent.detach().clone()
+        if self.distance_scale == 0:
+            ref_latent_expanded = (
+                ref_latent.half().unsqueeze(1).expand(-1, n, *ref_latent.shape[1:])
+            )
+            latent_expanded = (
+                latent.half().unsqueeze(0).expand(ref_latent.shape[0], *latent.shape)
+            )
+            dist = (ref_latent_expanded - latent_expanded) ** 2
+            del ref_latent_expanded, latent_expanded
+            dist = dist.mean(list(range(2, dist.dim())))
+        else:
+            dist = torch.linalg.vector_norm(
+                fallback(self.distance_scale_ref, self.distance_scale)
+                * ref_latent.half().flatten(start_dim=1).unsqueeze(1)
+                - self.distance_scale * latent.half().flatten(start_dim=1).unsqueeze(0),
+                dim=2,
+            )
         try:
             assign_mat = scipy.optimize.linear_sum_assignment(
-                dist, maximize=self.maximize
+                dist.cpu(), maximize=self.maximize
             )
-        except ValueError as _exc:
-            # print("\nImmiscible: Failed optimization, skipping")
+        except ValueError:
             return latent[: ref_latent.shape[0]]
-        # print("IMM IDX", assign_mat[1])
         return latent[assign_mat[1]]
 
 
@@ -93,7 +104,8 @@ class NoiseSamplerCache:
         batch_size=1,
         caching=True,
         cache_reset_interval=9999,
-        set_seed=False,
+        set_seed=True,
+        seed_offset=1,
         scale=1.0,
         normalize_dims=(-3, -2, -1),
         immiscible=None,
@@ -103,7 +115,7 @@ class NoiseSamplerCache:
         self.x = x
         self.mega_x = None
         self.seed = seed
-        self.seed_offset = 0
+        self.seed_offset = seed_offset
         self.min_sigma = min_sigma
         self.max_sigma = max_sigma
         self.cache = {}
@@ -123,6 +135,11 @@ class NoiseSamplerCache:
         if set_seed:
             random.seed(seed)
             torch.manual_seed(seed)
+            if self.seed_offset > 0:
+                for _ in range(self.seed_offset):
+                    _ = torch.randn_like(x)
+        else:
+            self.seed_offset = 0
 
     def reset_cache(self):
         self.cache = {}

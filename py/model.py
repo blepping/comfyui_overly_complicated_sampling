@@ -8,6 +8,7 @@ from comfy.k_diffusion.sampling import to_d
 from . import filtering
 
 from .utils import fallback
+from .latent import OCSLatentFormat
 
 
 class History:
@@ -168,6 +169,9 @@ class ModelCallCache:
         self.cfg_scale_override = cfg_scale_override
         self.is_rectified_flow = x.shape[1] == 16 and isinstance(
             model.inner_model.inner_model.model_sampling, comfy.model_sampling.CONST
+        )
+        self.latent_format = OCSLatentFormat(
+            x.device, model.inner_model.inner_model.latent_format
         )
         if self.cache.size < 1:
             return

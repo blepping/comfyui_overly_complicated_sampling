@@ -11,6 +11,20 @@ from comfy import latent_formats
 
 from .external import MODULES as EXT
 
+EXT_NNLATENTUPSCALE = None
+
+
+def init_integrations():
+    global get_noise_sampler, EXT_NNLATENTUPSCALE
+
+    ext_sonar = EXT.sonar
+    if ext_sonar is not None:
+        get_noise_sampler = ext_sonar.noise.get_noise_sampler
+    EXT_NNLATENTUPSCALE = EXT.nnlatentupscale
+
+
+EXT.register_init_handler(init_integrations)
+
 
 def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
     min_val, max_val = (
@@ -231,39 +245,107 @@ else:
         return F.interpolate(samples, size=(height, width), mode=mode)
 
 
-if "sonar" in EXT:
-    get_noise_sampler = EXT["sonar"].noise.get_noise_sampler
-else:
-
-    def get_noise_sampler(noise_type, x, *_args: list, **_kwargs: dict):
-        if noise_type != "gaussian":
-            raise ValueError("Only gaussian noise supported")
-        return lambda _s, _sn: torch.randn_like(x)
+def get_noise_sampler(noise_type, x, *_args: list, **_kwargs: dict):  # noqa: F811
+    if noise_type != "gaussian":
+        raise ValueError("Only gaussian noise supported")
+    return lambda _s, _sn: torch.randn_like(x)
 
 
-if "nnlatentupscale" in EXT:
-
-    def scale_nnlatentupscale(
-        mode,
-        latent,
-        scale=2.0,
-        *,
-        scale_factor=0.13025,
-        __nlu_module=EXT["nnlatentupscale"],
-    ):
-        module = __nlu_module
-        mode = {"sdxl": "SDXL", "sd1": "SD 1.x"}.get(mode)
-        if mode is None:
-            raise ValueError("Bad mode")
-        node = module.NNLatentUpscale()
-        model = module.latent_resizer.LatentResizer.load_model(
-            node.weight_path[mode], latent.device, latent.dtype
-        ).to(device=latent.device)
-        result = (
-            model(scale_factor * latent, scale=scale).to(
-                dtype=latent.dtype, device=latent.device
-            )
-            / scale_factor
+def scale_nnlatentupscale(mode, latent, scale=2.0, *, scale_factor=0.13025):
+    if EXT_NNLATENTUPSCALE is None:
+        raise RuntimeError("nnlatentupscale integration not available")
+    mode = {"sdxl": "SDXL", "sd1": "SD 1.x"}.get(mode)
+    if mode is None:
+        raise ValueError("Bad mode")
+    node = EXT_NNLATENTUPSCALE.NNLatentUpscale()
+    model = EXT_NNLATENTUPSCALE.latent_resizer.LatentResizer.load_model(
+        node.weight_path[mode], latent.device, latent.dtype
+    ).to(device=latent.device)
+    result = (
+        model(scale_factor * latent, scale=scale).to(
+            dtype=latent.dtype, device=latent.device
         )
-        del model
-        return result
+        / scale_factor
+    )
+    del model
+    return result
+
+
+# Gaussian blur
+def gaussian_blur_2d(img, kernel_size, sigma):
+    height = img.shape[-1]
+    kernel_size = min(kernel_size, height - (height % 2 - 1))
+    ksize_half = (kernel_size - 1) * 0.5
+
+    x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)
+
+    pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+
+    x_kernel = pdf / pdf.sum()
+    x_kernel = x_kernel.to(device=img.device, dtype=img.dtype)
+
+    kernel2d = torch.mm(x_kernel[:, None], x_kernel[None, :])
+    kernel2d = kernel2d.expand(img.shape[-3], 1, kernel2d.shape[0], kernel2d.shape[1])
+
+    padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
+
+    img = torch.nn.functional.pad(img, padding, mode="reflect")
+    img = torch.nn.functional.conv2d(img, kernel2d, groups=img.shape[-3])
+
+    return img
+
+
+# Saliency-adaptive Noise Fusion based on High-fidelity Person-centric Subject-to-Image Synthesis (Wang et al.)
+# https://github.com/CodeGoat24/Face-diffuser/blob/edff1a5178ac9984879d9f5e542c1d0f0059ca5f/facediffuser/pipeline.py#L535-L562
+def snf_guidance(
+    t_guidance: torch.Tensor,
+    s_guidance: torch.Tensor,
+    t_kernel_size=3,
+    t_sigma=1,
+    s_kernel_size=3,
+    s_sigma=1,
+):
+    b, c, h, w = shape = t_guidance.shape
+
+    t_softmax, s_softmax = (
+        torch.softmax(
+            gaussian_blur_2d(torch.abs(t), ks, sig).reshape(b * c, h * w),
+            dim=1,
+        ).reshape(*shape)
+        for t, ks, sig in (
+            (t_guidance, t_kernel_size, t_sigma),
+            (s_guidance, s_kernel_size, s_sigma),
+        )
+    )
+    guidance_stacked = torch.stack((t_guidance, s_guidance), dim=0)
+    argeps = torch.argmax(
+        torch.stack((t_softmax, s_softmax), dim=0), dim=0, keepdim=True
+    )
+    return torch.gather(guidance_stacked, dim=0, index=argeps).squeeze(0)
+
+
+class OCSLatentFormat:
+    def __init__(self, device, latent_format):
+        self.rgb_factors = torch.tensor(
+            latent_format.latent_rgb_factors, device=device, dtype=torch.float
+        ).t()
+        # Thanks for Joviax for the help implementing this!
+        self.rgb_factors_inv = torch.linalg.pinv(self.rgb_factors)
+        bias = getattr(latent_format, "latent_rgb_factors_bias", None)
+        self.rgb_factors_bias = (
+            None
+            if bias is None
+            else torch.tensor(bias, device=device, dtype=torch.float)
+        )
+
+    def latent_to_rgb(self, latent: torch.Tensor) -> torch.Tensor:
+        # NCHW -> NHWC
+        return torch.nn.functional.linear(
+            latent.movedim(1, -1), self.rgb_factors, bias=self.rgb_factors_bias
+        )
+
+    def rgb_to_latent(self, img: torch.Tensor) -> torch.Tensor:
+        # NHWC
+        if self.rgb_factors_bias is not None:
+            img = img - self.rgb_factors_bias
+        return torch.nn.functional.linear(img, self.rgb_factors_inv)

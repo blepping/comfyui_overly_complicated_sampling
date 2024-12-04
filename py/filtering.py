@@ -10,23 +10,33 @@ from .utils import fallback
 
 OD = collections.OrderedDict
 
-EXT_BLEH = EXT.get("bleh")
-EXT_SONAR = EXT.get("sonar")
-
-if "bleh" in EXT:
-    BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES
-else:
-    BLENDING_MODES = {
-        "lerp": lambda a, b, t: (1 - t) * a + t * b,
-    }
-
-BLENDING_MODES = BLENDING_MODES | {
+BLENDING_MODES = {
+    "lerp": torch.lerp,
     "a_only": lambda a, b, t: a * t,
     "b_only": lambda a, b, t: b * t,
+    "inject": lambda a, b, t: (b * t).add_(a),
 }
 
 FILTER = {}
 
+EXT_BLEH = None
+
+
+def init_integrations():
+    global BLENDING_MODES, FILTER, EXT_BLEH
+    EXT_BLEH = EXT.bleh
+    if EXT_BLEH is not None:
+        BLENDING_MODES |= EXT_BLEH.latent_utils.BLENDING_MODES
+        FILTER |= {
+            "bleh_enhance": BlehEnhanceFilter,
+            "bleh_ops": BlehOpsFilter,
+        }
+    ext_sonar = EXT.sonar
+    if ext_sonar is not None:
+        FILTER["sonar_power_filter"] = SonarPowerFilter
+
+
+EXT.register_init_handler(init_integrations)
 
 FILTER_HANDLERS = expr.HandlerContext(
     expr.BASIC_HANDLERS | expression_handlers.HANDLERS
@@ -34,8 +44,9 @@ FILTER_HANDLERS = expr.HandlerContext(
 
 
 class FilterRefs:
-    def __init__(self, kvs=None):
+    def __init__(self, kvs=None, *, ctx=None):
         self.kvs = fallback(kvs, {})
+        self.ctx = fallback(ctx, {})
 
     def get(self, k, default=None):
         return self.kvs.get(k, default)
@@ -47,13 +58,14 @@ class FilterRefs:
         self.kvs[k] = v
 
     def clone(self):
-        return self.__class__(self.kvs.copy())
+        return self.__class__(self.kvs.copy(), ctx=self.ctx)
 
     def __or__(self, other):
-        return self.__class__(self.kvs | other.kvs)
+        return self.__class__(self.kvs | other.kvs, ctx=self.ctx | other.ctx)
 
     def __ior__(self, other):
         self.kvs |= other.kvs
+        self.ctx |= other.ctx
         return self
 
     def __delitem__(self, k):
@@ -77,25 +89,28 @@ class FilterRefs:
     @classmethod
     def from_ss(cls, ss, *, have_current=False):
         ms = ss.model.model_sampling
-        fr = cls({
-            "step": ss.step,
-            "substep": ss.substep,
-            "dt": ss.dt,
-            "sigma_idx": ss.idx,
-            "sigma": ss.sigma,
-            "sigma_next": ss.sigma_next,
-            "sigma_down": ss.sigma_down,
-            "sigma_up": ss.sigma_up,
-            "sigma_prev": ss.sigma_prev,
-            "hist_len": len(ss.hist),
-            "sigma_min": ms.sigma_min.item(),
-            "sigma_max": ms.sigma_max.item(),
-            "step_pct": float(ss.step / ss.total_steps),
-            "total_steps": ss.total_steps,
-            "sampling_pct": (999 - ms.timestep(ss.sigma).item()) / 999,
-            "is_rectified_flow": ss.model.is_rectified_flow,
-            "original_cfg_scale": ss.model.inner_cfg_scale,
-        })
+        fr = cls(
+            {
+                "step": ss.step,
+                "substep": ss.substep,
+                "dt": ss.dt,
+                "sigma_idx": ss.idx,
+                "sigma": ss.sigma,
+                "sigma_next": ss.sigma_next,
+                "sigma_down": ss.sigma_down,
+                "sigma_up": ss.sigma_up,
+                "sigma_prev": ss.sigma_prev,
+                "hist_len": len(ss.hist),
+                "sigma_min": ms.sigma_min.item(),
+                "sigma_max": ms.sigma_max.item(),
+                "step_pct": float(ss.step / ss.total_steps),
+                "total_steps": ss.total_steps,
+                "sampling_pct": (999 - ms.timestep(ss.sigma).item()) / 999,
+                "is_rectified_flow": ss.model.is_rectified_flow,
+                "original_cfg_scale": ss.model.inner_cfg_scale,
+            },
+            ctx={"ss": ss, "model": ss.model},
+        )
         if have_current and len(ss.hist) > 0:
             fr |= cls.from_mr(ss.hcur)
             fr["d"] = ss.d
@@ -398,100 +413,88 @@ class NormalizeFilter_:
 
 Normalize = NormalizeFilter
 
-if EXT_BLEH:
 
-    class BlehEnhanceFilter(Filter):
-        name = "bleh_enhance"
-        default_options = Filter.default_options | {
-            "enhance_mode": None,
-            "enhance_scale": 1.0,
-        }
-
-        def filter(self, latent, *args, **kwargs):
-            if self.enhance_mode is None or self.enhance_scale == 1:
-                return latent
-            return EXT_BLEH.latent_utils.enhance_tensor(
-                latent, self.enhance_mode, scale=self.enhance_scale, adjust_scale=False
-            )
-
-    class BlehOpsFilter(Filter):
-        name = "bleh_ops"
-        default_options = Filter.default_options | {"ops": ()}
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            if isinstance(self.ops, (tuple, list)):
-                self.ops = EXT_BLEH.nodes.ops.RuleGroup(
-                    tuple(
-                        r
-                        for rs in self.ops
-                        for r in EXT_BLEH.nodes.ops.Rule.from_dict(rs)
-                    )
-                )
-                return
-            if not isinstance(self.ops, str):
-                raise ValueError("ops key must be a YAML string or list of object")
-            self.ops = EXT_BLEH.nodes.ops.RuleGroup.from_yaml(self.ops)
-
-        def filter(self, latent, ref_latent, *args, refs=None, **kwargs):
-            if not self.ops:
-                return latent
-            refs = fallback(refs, {})
-            bops = EXT_BLEH.nodes.ops
-            state = {
-                bops.CondType.TYPE: bops.PatchType.LATENT,
-                bops.CondType.PERCENT: 0.0,
-                bops.CondType.BLOCK: -1,
-                bops.CondType.STAGE: -1,
-                bops.CondType.STEP: refs.get("step", 0),
-                bops.CondType.STEP_EXACT: refs.get("step", -1),
-                "h": latent,
-                "hsp": ref_latent,
-                "target": "h",
-            }
-            self.ops.eval(state, toplevel=True)
-            return state["h"]
-
-    FILTER |= {
-        "bleh_enhance": BlehEnhanceFilter,
-        "bleh_ops": BlehOpsFilter,
+class BlehEnhanceFilter(Filter):
+    name = "bleh_enhance"
+    default_options = Filter.default_options | {
+        "enhance_mode": None,
+        "enhance_scale": 1.0,
     }
 
-if EXT_SONAR:
+    def filter(self, latent, *args, **kwargs):
+        if self.enhance_mode is None or self.enhance_scale == 1:
+            return latent
+        return EXT_BLEH.latent_utils.enhance_tensor(
+            latent, self.enhance_mode, scale=self.enhance_scale, adjust_scale=False
+        )
 
-    class SonarPowerFilter(Filter):
-        name = "sonar_power_filter"
-        default_options = Filter.default_options
 
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            power_filter = self.options.pop("power_filter", None)
-            if power_filter is None:
-                self.power_filter = None
-                return
-            if not isinstance(power_filter, dict):
-                raise ValueError("power_filter key must be dict or null")
-            self.power_filter = (
-                expression_handlers.SonarPowerFilterHandler.make_power_filter(
-                    power_filter
+class BlehOpsFilter(Filter):
+    name = "bleh_ops"
+    default_options = Filter.default_options | {"ops": ()}
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if isinstance(self.ops, (tuple, list)):
+            self.ops = EXT_BLEH.nodes.ops.RuleGroup(
+                tuple(
+                    r for rs in self.ops for r in EXT_BLEH.nodes.ops.Rule.from_dict(rs)
                 )
             )
+            return
+        if not isinstance(self.ops, str):
+            raise ValueError("ops key must be a YAML string or list of object")
+        self.ops = EXT_BLEH.nodes.ops.RuleGroup.from_yaml(self.ops)
 
-        def filter(self, latent, ref_latent, *args, refs=None, **kwargs):
-            if not self.power_filter:
-                return latent
-            filter_rfft = self.power_filter.make_filter(latent.shape).to(
-                latent.device, non_blocking=True
-            )
-            ns = self.power_filter.make_noise_sampler_internal(
-                latent,
-                lambda *_unused, latent=latent: latent,
-                filter_rfft,
-                normalized=False,
-            )
-            return ns(None, None)
+    def filter(self, latent, ref_latent, *args, refs=None, **kwargs):
+        if not self.ops:
+            return latent
+        refs = fallback(refs, {})
+        bops = EXT_BLEH.nodes.ops
+        state = {
+            bops.CondType.TYPE: bops.PatchType.LATENT,
+            bops.CondType.PERCENT: 0.0,
+            bops.CondType.BLOCK: -1,
+            bops.CondType.STAGE: -1,
+            bops.CondType.STEP: refs.get("step", 0),
+            bops.CondType.STEP_EXACT: refs.get("step", -1),
+            "h": latent,
+            "hsp": ref_latent,
+            "target": "h",
+        }
+        self.ops.eval(state, toplevel=True)
+        return state["h"]
 
-    FILTER |= {"sonar_power_filter": SonarPowerFilter}
+
+class SonarPowerFilter(Filter):
+    name = "sonar_power_filter"
+    default_options = Filter.default_options
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        power_filter = self.options.pop("power_filter", None)
+        if power_filter is None:
+            self.power_filter = None
+            return
+        if not isinstance(power_filter, dict):
+            raise ValueError("power_filter key must be dict or null")
+        self.power_filter = (
+            expression_handlers.SonarPowerFilterHandler.make_power_filter(power_filter)
+        )
+
+    def filter(self, latent, ref_latent, *args, refs=None, **kwargs):
+        if not self.power_filter:
+            return latent
+        filter_rfft = self.power_filter.make_filter(latent.shape).to(
+            latent.device, non_blocking=True
+        )
+        ns = self.power_filter.make_noise_sampler_internal(
+            latent,
+            lambda *_unused, latent=latent: latent,
+            filter_rfft,
+            normalized=False,
+        )
+        return ns(None, None)
 
 
 def make_filter(args):

@@ -81,14 +81,14 @@ class Expression:
     def fixup_token(cls, t):
         if t == "":
             return t
+        if t[0] == "'":
+            return ExpSym(t[1:])
         t = t.lower()
         val = cls.FIXUP.get(t, Empty)
         if val is not Empty:
             return val
         if t[0] == "`":
             return ExpBinOp(t.strip("`"))
-        if t[0] == "'":
-            return ExpSym(t[1:])
         if (len(t) > 1 and t[0] == "-" and t[1].isdigit()) or t[0].isdigit():
             return float(t) if "." in t else int(t)
         return ExpOp(t)

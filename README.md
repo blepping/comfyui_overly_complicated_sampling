@@ -27,12 +27,12 @@ _Note for Flux users_: Set `cfg1_uncond_optimization: true` in the `model` block
 I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
 
 * Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
-* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4, RKF45, dynamic RK(4) and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4, RKF45, dynamic RK(4) and Euler Dancing samplers based on implementation from [https://github.com/Clybius/ComfyUI-Extra-Samplers](https://github.com/Clybius/ComfyUI-Extra-Samplers).
 * TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
 * Distance sampler based on implementation from https://github.com/Extraltodeus/DistanceSampler
 * IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
 * Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and idea for sampling with it from https://github.com/Clybius
+* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and https://github.com/yhli123/Immiscible-Diffusion - idea for sampling with it and implementation help from https://github.com/Clybius
 * Precedence climbing (Pratt) expression parser based on implementation from https://github.com/andychu/pratt-parsing-demo
 
 This repo wouldn't be possible without building on the work of others. Thanks!
@@ -110,7 +110,11 @@ noise:
     # ComfyUI has a bug where if you disable add_noise in the sampler, no seed gets set. If you
     # are manually noising a sample and have add_noise turned off then you should enable this if
     # you want reproducible generations.
-    set_seed: false
+    set_seed: true
+
+    # Only has an effect when set_seed is enabled. Will advance the RNG this many times to
+    # avoid the common mistake of using the same noise for sampling as the initial noise.
+    seed_offset: 1
 
     # Global scale scale for generated noise
     scale: 1.0
@@ -349,12 +353,15 @@ In alphabetical order.
 * `adapter`: Wraps a normal ComfyUI `SAMPLER`. Attach a `SAMPLER` parameter to the node. Note: Samplers that do unusual stuff like try to manipulate the model won't work. ComfyUI's built-in CFG++ samplers in particular do not work here.
 * `bogacki`: Bogacki-Shampine sampler. Also has a reversible variant.
 * `deis`: See parameters: `history_limit`. Does not work well with ETA, I don't recommending leaving ETA at the default 1.
-* `distance`: See parameters: `distance`. Adaptive-ish/configurable step variant of Heun. Taken from: https://github.com/Extraltodeus/DistanceSampler
-* `dpmpp_2m_sde`: See parameters: `history_limit`.
+* `extraltodeus_distance`: See parameters: `distance`. Adaptive-ish/configurable step variant of Heun. Taken from: https://github.com/Extraltodeus/DistanceSampler
+* `dpmpp_2m_sde`: Also supports reversible parameters. See parameters: `history_limit`.
 * `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`.
 * `dpmpp_2s`
 * `dpmpp_3m_sde`: See parameters: `history_limit`.
 * `dpmpp_sde`
+* `dpm2`: Set `eta: 0` for non-ancestral variant.
+* `clybius_sens`
+* `blep_bas`: Batch Augmented Sampler. My own dumb experiment that expands the batch and averages the result. May be very slow/require a lot of VRAM. See parameters: `bas`
 * `dynamic`: Advanced step method that allows using an expression to determine the sampler parameters at each substep. See below for a more detailed explanation.
 * `euler_cycle`: See parameters: `cycle_pct`.
 * `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`.
@@ -503,15 +510,25 @@ cfgpp: false
 
 ### Reversible Settings ###
 
-# Reversible ETA (used for reversible samplers).
-reta: 1.0
-# Scale of the reversible correction. Can also be set to a negative value.
-reversible_scale: 1.0
-# No effect unless both start and end are set. Will scale the reta value based on the
-# percentage of sampling. In other words, reta*dyn_reta_start at the beginning,
-# reta*dyn_reta_end at the end.
-dyn_reta_start: null
-dyn_reta_end: null
+reversible:
+  # 0-indexed step where reversible sampling will start.
+  start_step: 0
+  # 0-indexed last step where reversible sampling will be used.
+  end_step: 9999
+  # Scale of the reversible correction. Can also be set to a negative value.
+  scale: 1.0
+  # Reversible ETA.
+  eta: 1.0
+
+  # No effect unless both start and end are set. Will scale the eta value based on the
+  # percentage of sampling. In other words, reta*dyn_reta_start at the beginning,
+  # reta*dyn_reta_end at the end.
+  dyn_eta_start: null
+  dyn_eta_end: null
+
+  eta_retry_increment: 0.0
+  # Might not do anything currently.
+  use_cfgpp: false
 
 pre_filter: null
 
@@ -594,6 +611,49 @@ diffrax_g_time_scaling: false
 # i.e. if you'd get 1,2,3,4 as g values for the step, with this it would be 1,2,-3,-4.
 diffrax_g_split_time_mode: false
 
+# blep_bas parameters
+bas:
+  # Batch expansion factor. Whatever your original batch size was will be multiplied
+  # by this. If it's 0 then you just get normal Euler.
+  batch_multiplier: 2
+  # First 0-indexed step when BAS sampling will apply.
+  start_step: 0
+  # Last 0-index step when BAS sampling will apply.
+  end_step: 3
+
+  s_noise: 1.0
+  eta: 0.0
+  eta_retry_increment: 0.0
+
+  # List of weights for the denoised batches, with 0 being the original denoised.
+  # If the list is smaller than the batch size, the list will be padded with the
+  # last item.
+  # If set to null it will be calculated automatically.
+  # Example: [0.5, 1.0]
+  # Will use weight 0.5 for the original denoised and 1.0 for any other items.
+  denoised_factors: null
+
+  # If set to something other than 0 the supplied denoised_factors will be rebalanced
+  # to add up to this number.
+  denoised_factors_scale: 1.0
+
+  # Global multiplier on denoised for BAS steps.
+  denoised_multiplier: 1.0
+
+  # One of: restart, restart_noneta, simple
+  renoise_mode: restart
+
+  # Multiplier on the start sigma for BAS steps.
+  # Note that taking the multipliers into account sigma_next must be less than sigma.
+  fromstep_factor: 1.0
+
+  # Multiplier on the end sigma for BAS steps.
+  tostep_factor: 1.0
+
+  # Source for the downstep. Can be one of dt, sigma or sigma_next.
+  # dt means you get bsigma + (sigma_next - bsigma) * tostep_factor
+  # where bsigma = sigma * fromstep_factor
+  tostep_source: dt
 
 ### Other Sampler Specific Parameters ###
 
@@ -606,6 +666,7 @@ diffrax_g_split_time_mode: false
 #   ipndm: 1 (max 3)
 #   ipndm_v: 1 (max 3)
 #   deis: 1 (max 3)
+#   clybius_sens: 2
 history_limit: 999 # Varies based on sampler.
 
 # Used for some samplers with variable order. List of samplers and default value below:

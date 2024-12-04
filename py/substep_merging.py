@@ -9,7 +9,8 @@ from . import utils
 from .filtering import make_filter, FilterRefs, FILTER_HANDLERS
 from .noise import ImmiscibleNoise
 from .restart import Restart
-from .step_samplers import STEP_SAMPLERS, StepSamplerContext
+from .step_samplers import STEP_SAMPLERS
+from .step_samplers.base import StepSamplerContext
 from .substep_sampling import StepSamplerChain
 from .utils import check_time, fallback
 

@@ -4,6 +4,7 @@ import torch
 from typing import Callable, Any
 
 from ..noise import scale_noise
+from ..nodes import WILDCARD_NOISE
 
 
 class CustomNoiseItemBase(abc.ABC):
@@ -151,7 +152,7 @@ class CustomNoiseNodeBase(abc.ABC):
         if include_chain:
             result["optional"] |= {
                 "ocs_noise_opt": (
-                    "OCS_NOISE",
+                    WILDCARD_NOISE,
                     {
                         "tooltip": "Optional input for more custom noise items.",
                     },

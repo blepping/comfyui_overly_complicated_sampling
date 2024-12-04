@@ -14,18 +14,29 @@ from .latent import OCSTAESD, ImageBatch
 ALLOW_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS") is not None
 ALLOW_ALL_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_ALL_UNSAFE") is not None
 
-EXT_BLEH = EXT.get("bleh")
-EXT_SONAR = EXT.get("sonar")
-EXT_NNLATENTUPSCALE = EXT.get("nnlatentupscale")
+EXT_BLEH = EXT_SONAR = None
 
-if "bleh" in EXT:
-    BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES
-else:
-    BLENDING_MODES = {
-        "lerp": lambda a, b, t: (1 - t) * a + t * b,
-    }
+BLENDING_MODES = {
+    "lerp": torch.lerp,
+}
 
 HANDLERS = {}
+
+
+def init_integrations():
+    global EXT_BLEH, EXT_SONAR, BLENDING_MODES, HANDLERS
+    EXT_BLEH = EXT.bleh
+    EXT_SONAR = EXT.sonar
+    if EXT_BLEH is not None:
+        BLENDING_MODES |= EXT_BLEH.latent_utils.BLENDING_MODES
+        HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
+    if EXT_SONAR is not None:
+        HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
+    if EXT.nnlatentupscale is not None:
+        HANDLERS["t_scale_nnlatentupscale"] = ScaleNNLatentUpscaleHandler()
+
+
+EXT.register_init_handler(init_integrations)
 
 
 class NormHandler(expr.BaseHandler):
@@ -105,7 +116,9 @@ class FlipHandler(NormHandler):
         out_slice = tuple(
             np.s_[:] if d != dim else np.s_[pivot:] for d in range(tensor.ndim)
         )
-        in_slice = tuple(np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim))
+        in_slice = tuple(
+            np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim)
+        )
         result[out_slice] = torch.flip(tensor[in_slice], dims=(dim,))
         return result
 
@@ -164,7 +177,6 @@ class ScaleHandler(NormHandler):
             scale = tuple(int(v) for v in scale)
         else:
             scale = (int(t.shape[-2] * scale[0]), int(t.shape[-1] * scale[1]))
-        print("SCALE", t.shape[-2:], "->", scale)
         if not all(v > 0 for v in scale):
             raise ValueError(f"Invalid scale: scale values must be > 0, got: {scale!r}")
         return latent.scale_samples(t, scale[1], scale[0], mode=mode)
@@ -192,6 +204,55 @@ class ShapeHandler(expr.BaseHandler):
     def handle(self, obj, getter):
         t = self.safe_get("tensor", obj, getter)
         return expr.types.ExpTuple((*t.shape,))
+
+
+class GaussianBlur2DHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("kernel_size"),
+        expr.Arg.numeric_scalar("sigma"),
+    )
+
+    def handle(self, obj, getter):
+        return latent.gaussian_blur_2d(*self.safe_get_all(obj, getter))
+
+
+class SNFGuidanceHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("t_tensor"),
+        expr.Arg.tensor("s_tensor"),
+        expr.Arg.integer("t_kernel_size", 3),
+        expr.Arg.numeric_scalar("t_sigma", 1),
+        expr.Arg.integer("s_kernel_size", 3),
+        expr.Arg.numeric_scalar("s_sigma", 1),
+    )
+
+    def handle(self, obj, getter):
+        return latent.snf_guidance(*self.safe_get_all(obj, getter))
+
+
+class RGBLatentHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("reference"),
+        expr.Arg.numscalar_sequence("rgb"),
+    )
+
+    def handle(self, obj, getter):
+        ctx = getter.ctx.constants.ctx
+        model = ctx.get("model")
+        if model is None:
+            raise ValueError("Ohno")
+        reference, rgb = self.safe_get_all(obj, getter)
+        if len(rgb) != 3 or not all(0 <= v <= 1.0 for v in rgb):
+            raise ValueError("Bad RGB parameter")
+        img = torch.tensor(
+            tuple(v * 2 - 1.0 for v in rgb),
+            device=reference.device,
+            dtype=reference.dtype,
+        ).view(1, 3)
+        latent = torch.zeros_like(reference).movedim(1, -1)
+        latent += model.latent_format.rgb_to_latent(img)
+        return latent.movedim(-1, 1)
 
 
 class TAESDDecodeHandler(expr.BaseHandler):
@@ -609,107 +670,93 @@ class UnsafeTorchHandler(expr.BaseHandler):
             return resolve_value(keys, torch)
 
 
-if EXT_BLEH:
+class BlehEnhanceHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.string("mode"),
+        expr.Arg.numeric_scalar("scale", 1.0),
+    )
+    output_validator = expr.Arg.tensor("output")
 
-    class BlehEnhanceHandler(expr.BaseHandler):
-        input_validators = (
-            expr.Arg.tensor("tensor"),
-            expr.Arg.string("mode"),
-            expr.Arg.numeric_scalar("scale", 1.0),
+    def handle(self, obj, getter):
+        tensor, mode, scale = self.safe_get_all(obj, getter)
+        return EXT_BLEH.latent_utils.enhance_tensor(
+            tensor, mode, scale=scale, adjust_scale=False
         )
-        output_validator = expr.Arg.tensor("output")
 
-        def handle(self, obj, getter):
-            tensor, mode, scale = self.safe_get_all(obj, getter)
-            return EXT_BLEH.latent_utils.enhance_tensor(
-                tensor, mode, scale=scale, adjust_scale=False
-            )
 
-    HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
+class SonarPowerFilterHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.present("filter"),
+    )
+    output_validator = expr.Arg.tensor("output")
 
-if EXT_SONAR:
+    default_power_filter = {
+        "mix": 1.0,
+        "normalization_factor": 1.0,
+        "common_mode": 0.0,
+        "channel_correlation": "1,1,1,1,1,1",
+    }
 
-    class SonarPowerFilterHandler(expr.BaseHandler):
-        input_validators = (
-            expr.Arg.tensor("tensor"),
-            expr.Arg.present("filter"),
-        )
-        output_validator = expr.Arg.tensor("output")
-
-        default_power_filter = {
-            "mix": 1.0,
-            "normalization_factor": 1.0,
-            "common_mode": 0.0,
-            "channel_correlation": "1,1,1,1,1,1",
-        }
-
-        @classmethod
-        def make_power_filter(cls, fdict, *, toplevel=True):
-            fdict = fdict.copy()
-            compose_with = fdict.pop("compose_with", None)
-            if compose_with:
-                if not isinstance(compose_with, dict):
-                    raise TypeError("compose_with must be a dictionary")
-                fdict["compose_with"] = cls.make_power_filter(
-                    compose_with, toplevel=False
+    @classmethod
+    def make_power_filter(cls, fdict, *, toplevel=True):
+        fdict = fdict.copy()
+        compose_with = fdict.pop("compose_with", None)
+        if compose_with:
+            if not isinstance(compose_with, dict):
+                raise TypeError("compose_with must be a dictionary")
+            fdict["compose_with"] = cls.make_power_filter(compose_with, toplevel=False)
+        topargs = {k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()}
+        power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
+        if not toplevel:
+            return power_filter
+        cc = topargs.get("channel_correlation")
+        if cc is not None:
+            if not isinstance(cc, (list, tuple)) or not all(
+                isinstance(v, (int, float)) for v in cc
+            ):
+                raise TypeError(
+                    "Bad channel correlation type: must be comma separated string or numeric sequence"
                 )
-            topargs = {
-                k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()
-            }
-            power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
-            if not toplevel:
-                return power_filter
-            cc = topargs.get("channel_correlation")
-            if cc is not None:
-                if not isinstance(cc, (list, tuple)) or not all(
-                    isinstance(v, (int, float)) for v in cc
-                ):
-                    raise TypeError(
-                        "Bad channel correlation type: must be comma separated string or numeric sequence"
-                    )
-                topargs["channel_correlation"] = ",".join(repr(v) for v in cc)
-            return EXT_SONAR.powernoise.PowerNoiseItem(
-                1, power_filter=power_filter, time_brownian=True, **topargs
-            )
-
-        def handle(self, obj, getter):
-            tensor, filter_def = self.safe_get_all(obj, getter)
-            if not isinstance(filter_def, dict):
-                raise TypeError("filter argument must be a dictionary")
-            power_filter = self.make_power_filter(filter_def)
-            filter_rfft = power_filter.make_filter(tensor.shape).to(
-                tensor.device, non_blocking=True
-            )
-            ns = power_filter.make_noise_sampler_internal(
-                tensor,
-                lambda *_unused, latent=tensor: latent,
-                filter_rfft,
-                normalized=False,
-            )
-            return ns(None, None)
-
-    HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
-
-if EXT_NNLATENTUPSCALE:
-    from .latent import scale_nnlatentupscale
-
-    class ScaleNNLatentUpscaleHandler(expr.BaseHandler):
-        input_validators = (
-            expr.Arg.tensor("tensor"),
-            expr.Arg.string("mode", "sd1"),
-            expr.Arg.numeric_scalar("scale", 2.0),
+            topargs["channel_correlation"] = ",".join(repr(v) for v in cc)
+        return EXT_SONAR.powernoise.PowerNoiseItem(
+            1, power_filter=power_filter, time_brownian=True, **topargs
         )
-        output_validator = expr.Arg.tensor("output")
 
-        def handle(self, obj, getter):
-            tensor, mode, scale = self.safe_get_all(obj, getter)
-            if mode not in {"sd1", "sdxl"}:
-                raise ValueError(
-                    "Bad mode for t_scale_nnlatentupscale: must be either sd15 or sdxl"
-                )
-            return scale_nnlatentupscale(mode, tensor, scale)
+    def handle(self, obj, getter):
+        tensor, filter_def = self.safe_get_all(obj, getter)
+        if not isinstance(filter_def, dict):
+            raise TypeError("filter argument must be a dictionary")
+        power_filter = self.make_power_filter(filter_def)
+        filter_rfft = power_filter.make_filter(tensor.shape).to(
+            tensor.device, non_blocking=True
+        )
+        ns = power_filter.make_noise_sampler_internal(
+            tensor,
+            lambda *_unused, latent=tensor: latent,
+            filter_rfft,
+            normalized=False,
+        )
+        return ns(None, None)
 
-    HANDLERS["t_scale_nnlatentupscale"] = ScaleNNLatentUpscaleHandler()
+
+class ScaleNNLatentUpscaleHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.string("mode", "sd1"),
+        expr.Arg.numeric_scalar("scale", 2.0),
+    )
+    output_validator = expr.Arg.tensor("output")
+
+    def handle(self, obj, getter):
+        tensor, mode, scale = self.safe_get_all(obj, getter)
+        if mode not in {"sd1", "sdxl"}:
+            raise ValueError(
+                "Bad mode for t_scale_nnlatentupscale: must be either sd15 or sdxl"
+            )
+        return latent.scale_nnlatentupscale(mode, tensor, scale)
+
 
 TENSOR_OP_HANDLERS = {
     "t_norm": NormHandler(),
@@ -722,6 +769,9 @@ TENSOR_OP_HANDLERS = {
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),
     "t_shape": ShapeHandler(),
+    "t_gaussianblur2d": GaussianBlur2DHandler(),
+    "t_rgb_latent": RGBLatentHandler(),
+    "t_snf_guidance": SNFGuidanceHandler(),
     "t_taesd_decode": TAESDDecodeHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),

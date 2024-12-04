@@ -114,9 +114,6 @@ def composable_sampler(
                 if idx > 0:
                     ss.update(idx, step=step, substep=0)
                     nsc.update_x(x)
-                # print(
-                #     f"STEP {step + 1:>3}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03} || up={ss.sigma_up.item():.03}, down={ss.sigma_down.item():.03}"
-                # )
                 ss.model.reset_cache()
                 nsc.update_x(x)
                 merge_sampler = find_merge_sampler(merge_samplers, ss)
