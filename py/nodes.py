@@ -8,29 +8,60 @@ from .step_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 from .substep_sampling import ParamGroup, StepSamplerChain, StepSamplerGroups
 
-DEFAULT_YAML_PARAMS = "# YAML/JSON parameters\n"
+try:
+    from comfy_execution import validation as comfy_validation
 
+    if not hasattr(comfy_validation, "validate_node_input"):
+        raise NotImplementedError
+    HAVE_COMFY_UNION_TYPE = comfy_validation.validate_node_input("B", "A,B")
+except (ImportError, NotImplementedError):
+    HAVE_COMFY_UNION_TYPE = False
+except Exception as exc:
+    HAVE_COMFY_UNION_TYPE = False
+    print(
+        f"** OCS: Warning, caught unexpected exception trying to detect ComfyUI union type support. Disabling. Exception: {exc}"
+    )
 
-class Wildcard(str):
-    __slots__ = ("whitelist",)
+PARAM_INPUT_TYPES = frozenset((
+    "IMAGE",
+    "OCS_NOISE",
+    "SAMPLER",
+    "SIGMAS",
+    "SONAR_CUSTOM_NOISE",
+    "UPSCALE_MODEL",
+    "VAE",
+))
 
-    @classmethod
-    def __new__(cls, s, *args: list, whitelist=None, **kwargs: dict):
-        result = super().__new__(s, *args, **kwargs)
-        result.whitelist = whitelist
-        return result
+NOISE_INPUT_TYPES = frozenset(("SONAR_CUSTOM_NOISE", "OCS_NOISE"))
 
-    def __ne__(self, other):
-        return False if self.whitelist is None else other not in self.whitelist
+if not HAVE_COMFY_UNION_TYPE:
 
+    class Wildcard(str):
+        __slots__ = ("whitelist",)
 
-WILDCARD_NOISE = Wildcard(
-    "*",
-    whitelist=frozenset((
-        "SONAR_CUSTOM_NOISE",
-        "OCS_NOISE",
-    )),
+        @classmethod
+        def __new__(cls, s, *args: list, whitelist=None, **kwargs: dict):
+            result = super().__new__(s, *args, **kwargs)
+            result.whitelist = whitelist
+            return result
+
+        def __ne__(self, other):
+            return False if self.whitelist is None else other not in self.whitelist
+
+    WILDCARD_NOISE = Wildcard("*", whitelist=NOISE_INPUT_TYPES)
+    WILDCARD_PARAM = Wildcard("*", whitelist=PARAM_INPUT_TYPES)
+else:
+    WILDCARD_NOISE = ",".join(NOISE_INPUT_TYPES)
+    WILDCARD_PARAM = ",".join(PARAM_INPUT_TYPES)
+
+PARAM_INPUT_TYPES_HINT = (
+    f"The following input types are supported: {', '.join(PARAM_INPUT_TYPES)}"
 )
+NOISE_INPUT_TYPES_HINT = (
+    f"The following input types are supported: {', '.join(NOISE_INPUT_TYPES)}"
+)
+
+DEFAULT_YAML_PARAMS = "# YAML/JSON parameters\n"
 
 
 class SamplerNode:
@@ -311,20 +342,7 @@ class ParamNode:
 
     FUNCTION = "go"
 
-    WC = Wildcard(
-        "*",
-        whitelist={
-            "IMAGE",
-            "OCS_NOISE",
-            "SAMPLER",
-            "SIGMAS",
-            "SONAR_CUSTOM_NOISE",
-            "UPSCALE_MODEL",
-            "VAE",
-        },
-    )
-
-    OCS_PARAM_TYPES = {
+    OCS_PARAM_INPUT_TYPES = {
         "custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
         "merge_sampler": lambda v: isinstance(v, StepSamplerChain),
         "restart_custom_noise": lambda v: hasattr(v, "make_noise_sampler"),
@@ -338,15 +356,15 @@ class ParamNode:
         return {
             "required": {
                 "key": (
-                    tuple(cls.OCS_PARAM_TYPES.keys()),
+                    tuple(cls.OCS_PARAM_INPUT_TYPES.keys()),
                     {
                         "tooltip": "Used to set the type of custom parameter.",
                     },
                 ),
                 "value": (
-                    cls.WC,
+                    WILDCARD_PARAM,
                     {
-                        "tooltip": "Connect the type of value expected by the key. Allows connecting output from any type of node HOWEVER if it is the wrong type expected by the key you will get an error when you run the workflow.",
+                        "tooltip": f"Connect the type of value expected by the key. Allows connecting output from any type of node HOWEVER if it is the wrong type expected by the key you will get an error when you run the workflow.\n{PARAM_INPUT_TYPES_HINT}",
                         "forceInput": True,
                     },
                 ),
@@ -389,7 +407,7 @@ class ParamNode:
 
     def go(self, *, key, value, params_opt=None, parameters=""):
         MODULES.initialize()
-        if not self.OCS_PARAM_TYPES[key](value):
+        if not self.OCS_PARAM_INPUT_TYPES[key](value):
             raise ValueError(f"CSamplerParam: Bad value type for key {key}")
         if parameters:
             extra_params = yaml.safe_load(parameters)
@@ -421,7 +439,7 @@ class MultiParamNode(ParamNode):
     @classmethod
     def INPUT_TYPES(cls):
         param_keys = (
-            ("", *ParamNode.OCS_PARAM_TYPES.keys()),
+            ("", *ParamNode.OCS_PARAM_INPUT_TYPES.keys()),
             {
                 "tooltip": "Used to set the type of custom parameter.",
             },
@@ -455,9 +473,9 @@ class MultiParamNode(ParamNode):
             }
             | {
                 f"value_opt_{idx}": (
-                    ParamNode.WC,
+                    WILDCARD_PARAM,
                     {
-                        "tooltip": "Connect the type of value expected by the corresponding key. Allows connecting output from any type of node HOWEVER if it is the wrong type expected by the corresponding key you will get an error when you run the workflow.",
+                        "tooltip": f"Connect the type of value expected by the corresponding key. Allows connecting output from any type of node HOWEVER if it is the wrong type expected by the corresponding key you will get an error when you run the workflow.\n{PARAM_INPUT_TYPES_HINT}",
                         "forceInput": True,
                     },
                 )
@@ -481,7 +499,7 @@ class MultiParamNode(ParamNode):
             key, value = kwargs.get(f"key_{idx}"), kwargs.get(f"value_opt_{idx}")
             if not key or value is None:
                 continue
-            if not self.OCS_PARAM_TYPES[key](value):
+            if not self.OCS_PARAM_INPUT_TYPES[key](value):
                 raise ValueError(f"CSamplerParamGroup: Bad value type for key {key}")
             extra = extra_params.get(str(idx))
             key = self.get_renamed_key(key, extra)

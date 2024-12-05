@@ -13,7 +13,7 @@ from .noise_perlin import PerlinItem
 
 from ..external import MODULES
 from ..filtering import BLENDING_MODES
-from ..nodes import WILDCARD_NOISE
+from ..nodes import WILDCARD_NOISE, NOISE_INPUT_TYPES_HINT
 from ..utils import scale_noise
 from ..noise import ImmiscibleNoise
 
@@ -27,7 +27,13 @@ class ToSonarNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "ocs_noise": (WILDCARD_NOISE,),
+                "ocs_noise": (
+                    WILDCARD_NOISE,
+                    {
+                        "tooltip": NOISE_INPUT_TYPES_HINT,
+                        "forceInput": True,
+                    },
+                ),
             },
         }
 
