@@ -15,6 +15,14 @@ from .base import (
 )
 
 
+try:
+    import pytorch_wavelets as ptwav
+
+    HAVE_WAVELETS = True
+except ImportError:
+    HAVE_WAVELETS = False
+
+
 class DynamicStep(SingleStepSampler):
     name = "dynamic"
     sample_sigma_zero = True
@@ -347,10 +355,165 @@ class BASStep(SingleStepSampler):
         yield from self.result(result, sigma_up)
 
 
+def scale_wavelets(waves, factor_yl, factor_yh=None):
+    factor_yh = fallback(factor_yh, factor_yl)
+    if factor_yl == 1 and factor_yh == 1:
+        return waves
+    return (waves[0] * factor_yl, tuple(t * factor_yh for t in waves[1]))
+
+
+def blend_wavelets(a, b, *, factor_yl, factor_yh, blend_yl, blend_yh=None):
+    blend_yh = fallback(blend_yh, blend_yl)
+    if not isinstance(factor_yl, torch.Tensor):
+        factor_yl = a[0].new_full((1,), factor_yl)
+    if not isinstance(factor_yh, torch.Tensor):
+        factor_yh = a[0].new_full((1,), factor_yh)
+    return (
+        blend_yl(a[0], b[0], factor_yl),
+        tuple(blend_yh(ta, tb, factor_yh) for ta, tb in zip(a[1], b[1])),
+    )
+
+
+class WeoonConfig(typing.NamedTuple):
+    start_step: int = 0
+    end_step: int = 9999
+    # One of dwt, dwt1d, dtcwt
+    wavelet_mode: str = "dwt"
+    padding: str = "periodization"
+    inv_padding: str | None = None
+    level: int = 3
+    wave: str = "db4"
+    inv_wave: str | None = None
+    dtcwt_qshift: str = "qshift_a"
+    dtcwt_biort: str = "near_sym_a"
+    dtcwt_inv_qshift: str | None = None
+    dtcwt_inv_biort: str | None = None
+    downstep_scale: float = 1.0
+    yl_strength: float = 1.0
+    yh_strength: float = 0.5
+    wavelet_blend_mode: str = "lerp"
+    wavelet_blend_mode_yh: str | None = None
+    denoised_yl_multiplier: float = 1.0
+    denoised_yh_multiplier: float = 1.0
+    denoised_down_yl_multiplier: float = 1.0
+    denoised_down_yh_multiplier: float = 1.0
+    flatten_start_dim: int = 2
+
+
+class WeoonStep(SingleStepSampler):
+    name = "blep_weoon"
+    model_calls = 1
+
+    def __init__(self, **kwargs):
+        if not HAVE_WAVELETS:
+            raise RuntimeError(
+                "Wavelet sampling requires the pytorch_wavelets package installed in your environment",
+            )
+        super().__init__(**kwargs)
+        w = self.weoon = WeoonConfig(**self.options.get("weoon", {}))
+        blend_mode = self.options.get("blend_mode", "lerp").strip()
+        self.blend = (
+            filtering.BLENDING_MODES[blend_mode] if blend_mode != "lerp" else torch.lerp
+        )
+        self.wavelet_blend = (
+            filtering.BLENDING_MODES[w.wavelet_blend_mode]
+            if w.wavelet_blend_mode != "lerp"
+            else torch.lerp
+        )
+        if w.wavelet_blend_mode_yh is None:
+            self.wavelet_blend_yh = self.wavelet_blend
+        else:
+            self.wavelet_blend_yh = (
+                filtering.BLENDING_MODES[w.wavelet_blend_mode_yh]
+                if w.wavelet_blend_mode_yh != "lerp"
+                else torch.lerp
+            )
+        if not (0 <= w.flatten_start_dim <= 2):
+            raise ValueError("Bad flatten_start_dim in Weoon sampler")
+        if w.wavelet_mode == "dtcwt":
+            self.wavelet_forward = ptwav.DTCWTForward(
+                J=w.level, mode=w.padding, biort=w.dtcwt_biort, qshift=w.dtcwt_qshift
+            )
+            self.wavelet_inverse = ptwav.DTCWTInverse(
+                mode=fallback(w.inv_padding, w.padding),
+                biort=fallback(w.dtcwt_inv_biort, w.dtcwt_biort),
+                qshift=fallback(w.dtcwt_inv_qshift, w.dtcwt_qshift),
+            )
+        elif w.wavelet_mode == "dwt":
+            self.wavelet_forward = ptwav.DWTForward(
+                J=w.level, wave=w.wave, mode=w.padding
+            )
+            self.wavelet_inverse = ptwav.DWTInverse(
+                wave=fallback(w.inv_wave, w.wave),
+                mode=fallback(w.inv_padding, w.padding),
+            )
+        elif w.wavelet_mode == "dwt1d":
+            self.wavelet_forward = ptwav.DWT1DForward(
+                J=w.level, wave=w.wave, mode=w.padding
+            )
+            self.wavelet_inverse = ptwav.DWT1DInverse(
+                wave=fallback(w.inv_wave, w.wave),
+                mode=fallback(w.inv_padding, w.padding),
+            )
+
+    def maybe_flatten(self, tensor: torch.Tensor) -> torch.Tensor:
+        w = self.weoon
+        need_flatten = w.wavelet_mode == "dwt1d"
+        if not need_flatten:
+            return tensor
+        start_dim = w.flatten_start_dim
+        tensor = tensor.flatten(start_dim=start_dim)
+        if start_dim == 0:
+            return tensor[None, None, ...]
+        if start_dim == 1:
+            return tensor[:, None, ...]
+        return tensor
+
+    def step(self, x):
+        w = self.weoon
+        ss = self.ss
+        sigma, sigma_next = ss.sigma, ss.sigma_next
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+        ratio = sigma_down / sigma
+        if not w.start_step <= ss.step <= w.end_step:
+            return (yield from self.result(self.blend(ss.denoised, x, ratio), sigma_up))
+        self.wavelet_forward.to(x)
+        self.wavelet_inverse.to(x)
+        dt = sigma_next - sigma
+        wsigma_next = (sigma + dt * w.downstep_scale).clamp_(0)
+        wratio = wsigma_next / sigma
+        x_down = self.blend(ss.denoised, x, wratio)
+        mr_down = self.call_model(x_down, wsigma_next, call_index=1)
+        coeffs = scale_wavelets(
+            self.wavelet_forward(self.maybe_flatten(ss.denoised)),
+            factor_yl=w.denoised_yl_multiplier,
+            factor_yh=w.denoised_yh_multiplier,
+        )
+        coeffs_down = scale_wavelets(
+            self.wavelet_forward(self.maybe_flatten(mr_down.denoised)),
+            factor_yl=w.denoised_down_yl_multiplier,
+            factor_yh=w.denoised_down_yh_multiplier,
+        )
+        coeffs_out = blend_wavelets(
+            coeffs,
+            coeffs_down,
+            factor_yl=w.yl_strength,
+            factor_yh=w.yh_strength,
+            blend_yl=self.wavelet_blend,
+            blend_yh=self.wavelet_blend_yh,
+        )
+        denoised_new = self.wavelet_inverse(coeffs_out)
+        if denoised_new.shape != x.shape:
+            denoised_new = denoised_new.reshape(*x.shape)
+        x = self.blend(denoised_new, x, ratio)
+        yield from self.result(x, sigma_up)
+
+
 registry.add(
     BASStep,
     DynamicStep,
     AdapterStep,
     EulerCycleStep,
     TrapezoidalCycleStep,
+    WeoonStep,
 )

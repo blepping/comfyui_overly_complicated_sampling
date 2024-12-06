@@ -177,7 +177,9 @@ class NoiseSamplerCache:
         size,
         sigma,
         sigma_next,
+        *,
         immiscible=None,
+        sigmas=None,
     ):
         size = min(size, self.batch_size)
         cache_key = (nsobj, size)
@@ -194,10 +196,14 @@ class NoiseSamplerCache:
                 return torch.randn_like(curr_x)
 
         else:
+            if sigmas is not None:
+                sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
+            else:
+                sigma_min, sigma_max = self.min_sigma, self.max_sigma
             ns = nsobj.make_noise_sampler(
                 curr_x,
-                self.min_sigma,
-                self.max_sigma,
+                sigma_min,
+                sigma_max,
                 seed=curr_seed,
                 normalized=False,
                 cpu=self.cpu_noise,

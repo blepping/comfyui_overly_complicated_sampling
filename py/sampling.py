@@ -78,8 +78,8 @@ def composable_sampler(
     nsc = NoiseSamplerCache(
         x,
         extra_args.get("seed", 42),
-        sigmas[-1],
-        sigmas[0],
+        sigmas[sigmas > 0].min(),
+        sigmas.max(),
         **copts.get("noise", {}),
     )
     ss.noise = nsc
