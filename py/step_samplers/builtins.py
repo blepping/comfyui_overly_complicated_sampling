@@ -189,6 +189,7 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
     self_noise = 1
     model_calls = 1
     allow_alt_cfgpp = True  # Implementation may not be correct.
+    uses_alt_noise = True
 
     def __init__(self, *args, r=1 / 2, **kwargs):
         super().__init__(*args, **kwargs)
@@ -214,7 +215,12 @@ class DPMPPSDEStep(SingleStepSampler, DPMPPStepMixin):
         )
         x_2 = (sigma_fn(s_) / sigma_fn(t)) * eff_x - (t - s_).expm1() * ss.denoised
         x_2 = yield from self.result(
-            x_2, su, sigma=sigma_fn(t), sigma_next=sigma_fn(s), final=False
+            x_2,
+            su,
+            sigma=sigma_fn(t),
+            sigma_next=sigma_fn(s),
+            noise_sampler=self.alt_noise_sampler,
+            final=False,
         )
         denoised_2 = self.call_model(x_2, sigma_fn(s), call_index=1).denoised
 

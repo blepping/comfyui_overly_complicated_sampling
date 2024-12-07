@@ -98,12 +98,12 @@ class SamplerResult:
         x = fallback(x, self.x)
         if self.sigma_next == 0 or self.noise_scale == 0:
             return x
-        noise = self.get_noise(ss=ss) * scale
+        noise = self.get_noise(ss=ss).mul_(scale)
         if not self.is_rectified_flow:
-            return x + noise
+            return noise.add_(x)
         x_coeff = (1 - self.sigma_next) / (1 - self.sigma_down)
         # print(f"\nRF noise: {x_coeff}")
-        return x_coeff * x + noise
+        return noise.add_(x_coeff * x)
 
     def clone(self):
         obj = self.__new__(self.__class__)
@@ -139,6 +139,7 @@ class SingleStepSampler:
     allow_cfgpp = False
     allow_alt_cfgpp = False
     afs_end_step = -1
+    uses_alt_noise = False
 
     default_eta = 1.0
 
@@ -186,6 +187,15 @@ class SingleStepSampler:
         self.custom_noise = self.options.get("custom_noise")
         if isinstance(self.custom_noise, str):
             self.custom_noise = self.options.get(f"custom_noise_{self.custom_noise}")
+        if not self.uses_alt_noise:
+            return
+        self.alt_custom_noise = self.options.get("custom_noise_alt")
+        alt_immiscible = self.options.get("alt_immiscible")
+        self.alt_immiscible = (
+            noise.ImmiscibleNoise(**alt_immiscible)
+            if isinstance(alt_immiscible, dict)
+            else alt_immiscible
+        )
 
     def __call__(self, x):
         ss = self.ss
@@ -225,10 +235,27 @@ class SingleStepSampler:
             ss.sigma_next,
             immiscible=fallback(self.immiscible, ss.noise.immiscible),
         )
+        if not self.uses_alt_noise:
+            return
+        if self.alt_custom_noise is None and self.alt_immiscible is None:
+            self.alt_noise_sampler = self.noise_sampler
+            return
+        self.alt_noise_sampler = ss.noise.make_caching_noise_sampler(
+            fallback(self.alt_custom_noise, self.custom_noise),
+            1,
+            ss.sigma,
+            ss.sigma_next,
+            immiscible=fallback(
+                fallback(self.alt_immiscible, self.immiscible),
+                ss.noise.immiscible,
+            ),
+        )
 
     def reset(self):
         self.ss = None
         self.noise_sampler = None
+        if self.uses_alt_noise:
+            self.alt_noise_sampler = None
 
     def afs_step(self, x):
         sigma, sigma_next = self.ss.sigma, self.ss.sigma_next

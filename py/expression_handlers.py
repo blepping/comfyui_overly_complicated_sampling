@@ -123,6 +123,16 @@ class FlipHandler(NormHandler):
         return result
 
 
+class CopySignHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.tensor("other"),
+    )
+
+    def handle(self, obj, getter):
+        return torch.copysign(*self.safe_get_all(obj, getter))
+
+
 class BlendHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor1"),
@@ -765,6 +775,7 @@ TENSOR_OP_HANDLERS = {
     "t_blend": BlendHandler(),
     "t_roll": RollHandler(),
     "t_flip": FlipHandler(),
+    "t_copysign": CopySignHandler(),
     "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),

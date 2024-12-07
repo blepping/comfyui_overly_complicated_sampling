@@ -354,7 +354,7 @@ class RKDynamicStep(SingleStepSampler):
 
 # Based on original implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
 class EulerDancingStep(SingleStepSampler):
-    name = "euler_dancing"
+    name = "clybius_euler_dancing"
     self_noise = 1
 
     def __init__(

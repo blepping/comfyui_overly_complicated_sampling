@@ -182,7 +182,9 @@ class NoiseSamplerCache:
         sigmas=None,
     ):
         size = min(size, self.batch_size)
-        cache_key = (nsobj, size)
+        if immiscible is None:
+            immiscible = self.immiscible
+        cache_key = (nsobj, size, hash(immiscible))
         if self.caching:
             noise_sampler = self.cache.get(cache_key)
             if noise_sampler:
@@ -192,8 +194,16 @@ class NoiseSamplerCache:
         curr_x = self.mega_x[: self.x.shape[0] * size, ...]
         if nsobj is None:
 
-            def ns(_s, _sn, *_unused, **_unusedkwargs):
-                return torch.randn_like(curr_x)
+            def ns(*_unused, **_unusedkwargs):
+                noise = torch.randn(
+                    curr_x.shape,
+                    dtype=curr_x.dtype,
+                    layout=curr_x.layout,
+                    device="cpu" if self.cpu_noise else curr_x.device,
+                )
+                if noise.device != curr_x.device:
+                    return noise.to(curr_x.device)
+                return noise
 
         else:
             if sigmas is not None:
@@ -212,8 +222,6 @@ class NoiseSamplerCache:
         orig_h, orig_w = self.x.shape[-2:]
         remain = 0
         noise = None
-        if immiscible is None:
-            immiscible = self.immiscible
 
         def noise_sampler_(
             curr_sigma,

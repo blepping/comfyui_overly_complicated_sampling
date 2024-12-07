@@ -39,6 +39,8 @@ class MergeSubstepsSampler:
         self.preview_mode = options.pop("preview_mode", "denoised")
         self.require_uncond = any(sampler.require_uncond for sampler in samplers)
         self.cfg_scale_override = options.pop("cfg_scale_override", None)
+        self.afs_start_step = options.pop("afs_start_step", 0)
+        self.afs_end_step = options.pop("afs_end_step", -1)
         self.options = options
 
     def check_match(self, handlers: None | object, *, ss: None | object = None):
@@ -74,8 +76,17 @@ class MergeSubstepsSampler:
     def __call__(self, x):
         orig_x = x
         x = self.step_input(x)
-        x = self.step(x)
+        if self.afs_start_step <= self.ss.step <= self.afs_end_step:
+            x = self.afs_step(x)
+        else:
+            x = self.step(x)
         return self.step_output(x, orig_x=orig_x)
+
+    def afs_step(self, x):
+        sigma, sigma_next = self.ss.sigma, self.ss.sigma_next
+        afs_d = x / ((1 + sigma**2).sqrt())
+        dt = sigma_next - sigma
+        return x + afs_d * dt
 
     def step(self, x):
         raise NotImplementedError

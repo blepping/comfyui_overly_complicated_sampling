@@ -246,6 +246,12 @@ class Filter:
         refs = drefs if refs is None else refs | drefs
         return ops.eval(FILTER_HANDLERS.clone(constants=refs, variables={}))
 
+    def __str__(self):
+        prettyvals = ", ".join(
+            f"{k}={getattr(self, k, None)!s}" for k in self.default_options.keys()
+        )
+        return f"<Filter({self.name}): {prettyvals}>"
+
 
 class SimpleFilter(Filter):
     name = "simple"

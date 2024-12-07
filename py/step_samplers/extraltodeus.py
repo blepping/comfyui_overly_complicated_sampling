@@ -1,5 +1,7 @@
 # Samplers based on design from https://github.com/Extraltodeus/
 
+import typing
+
 import torch
 import tqdm
 
@@ -7,30 +9,36 @@ from .base import SingleStepSampler
 from . import registry
 
 
+class DistanceConfig(typing.NamedTuple):
+    resample: int = 3
+    resample_end: int = 1
+    eta: float = 0.0
+    s_noise: float = 1.0
+    alt_cfgpp_scale: float = 0.0
+    first_eta_step: int = 0
+    last_eta_step: int = -1
+    custom_noise_name: str = "alt"
+    immiscible: dict | bool | None = None
+
+
 # Based on https://github.com/Extraltodeus/DistanceSampler
 class DistanceStep(SingleStepSampler):
-    name = "distance"
+    name = "extraltodeus_distance"
     allow_alt_cfgpp = True
     model_calls = -1
+    uses_alt_noise = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        distance = self.options.get("distance", {})
-        self.distance_resample = distance.get("resample", 3)
-        self.distance_resample_end = distance.get("resample_end", 1)
-        self.distance_resample_eta = distance.get("eta", self.eta)
-        self.distance_resample_s_noise = distance.get("s_noise", self.s_noise)
-        self.distance_alt_cfgpp_scale = distance.get("alt_cfgpp_scale", 0.0)
-        self.distance_first_eta_resample_step = distance.get("first_eta_step", 0)
-        self.distance_last_eta_resample_step = distance.get("last_eta_step", -1)
+        self.distance = DistanceConfig(**self.options.get("distance", {}))
 
     @property
     def require_uncond(self):
-        return super().require_uncond or self.distance_alt_cfgpp_scale != 0
+        return super().require_uncond or self.distance.alt_cfgpp_scale != 0
 
     def distance_resample_steps(self):
         ss = self.ss
-        resample, resample_end = self.distance_resample, self.distance_resample_end
+        resample, resample_end = self.distance.resample, self.distance.resample_end
         if resample == -1:
             current_resample = min(10, (ss.sigmas.shape[0] - ss.idx) // 2)
         else:
@@ -70,10 +78,11 @@ class DistanceStep(SingleStepSampler):
         resample_steps = self.distance_resample_steps()
         if resample_steps < 1:
             return (yield from self.euler_step(x))
+        distance = self.distance
         ss = self.ss
         sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
-        rsigma_down, rsigma_up = self.get_ancestral_step(eta=self.distance_resample_eta)
-        rsigma_up *= self.distance_resample_s_noise
+        rsigma_down, rsigma_up = self.get_ancestral_step(eta=distance.eta)
+        rsigma_up *= distance.s_noise
         sigma, sigma_next = ss.sigma, ss.sigma_next
         zero_up = sigma * 0
         d = self.to_d(ss.hcur)
@@ -81,8 +90,8 @@ class DistanceStep(SingleStepSampler):
         start_eta_idx, end_eta_idx = (
             max(0, resample_steps + v if v < 0 else v)
             for v in (
-                self.distance_first_eta_resample_step,
-                self.distance_last_eta_resample_step,
+                distance.first_eta_step,
+                distance.last_eta_step,
             )
         )
         dt = sigma_down - sigma
@@ -103,11 +112,12 @@ class DistanceStep(SingleStepSampler):
                     curr_sigma_up,
                     sigma=sigma,
                     sigma_down=curr_sigma_down,
+                    noise_sampler=self.alt_noise_sampler,
                     final=False,
                 )
             sr = self.call_model(x_new, sigma_next, call_index=re_step + 1)
             new_d = sr.to_d(
-                sigma=curr_sigma_down, alt_cfgpp_scale=self.distance_alt_cfgpp_scale
+                sigma=curr_sigma_down, alt_cfgpp_scale=distance.alt_cfgpp_scale
             )
             x_n.append(new_d)
             if re_step == 0:

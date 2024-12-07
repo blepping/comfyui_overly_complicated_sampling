@@ -245,13 +245,14 @@ class BASConfig(typing.NamedTuple):
 class BASStep(SingleStepSampler):
     name = "blep_bas"
     model_calls = -1
+    uses_alt_noise = True
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.bas = BASConfig(**self.options.get("bas", {}))
-        if self.bas.renoise_mode not in {"restart", "restart_noneta", "simple"}:
+        bas = self.bas = BASConfig(**self.options.get("bas", {}))
+        if bas.renoise_mode not in {"restart", "restart_noneta", "simple"}:
             raise ValueError("Bad BAS renoise mode")
-        if self.bas.tostep_source not in {"dt", "sigma", "sigma_next"}:
+        if bas.tostep_source not in {"dt", "sigma", "sigma_next"}:
             raise ValueError("Bad BAS tostep_source")
         blend_mode = self.options.get("blend_mode", "lerp").strip()
         self.blend = (
@@ -333,7 +334,10 @@ class BASStep(SingleStepSampler):
             ] = yield from self.result(
                 x_new,
                 noise_factor,
+                sigma=bsigma,
+                sigma_down=bsigma_down,
                 s_noise=bas.s_noise,
+                noise_sampler=self.alt_noise_sampler,
                 final=False,
             )
         s_in = x.new_ones(expanded_batch)
@@ -377,6 +381,9 @@ def blend_wavelets(a, b, *, factor_yl, factor_yh, blend_yl, blend_yh=None):
 class WeoonConfig(typing.NamedTuple):
     start_step: int = 0
     end_step: int = 9999
+    eta: float = 0.0
+    eta_retry_increment: float = 0.0
+    s_noise: float = 1.0
     # One of dwt, dwt1d, dtcwt
     wavelet_mode: str = "dwt"
     padding: str = "periodization"
@@ -403,6 +410,7 @@ class WeoonConfig(typing.NamedTuple):
 class WeoonStep(SingleStepSampler):
     name = "blep_weoon"
     model_calls = 1
+    uses_alt_noise = True
 
     def __init__(self, **kwargs):
         if not HAVE_WAVELETS:
@@ -481,8 +489,24 @@ class WeoonStep(SingleStepSampler):
         self.wavelet_inverse.to(x)
         dt = sigma_next - sigma
         wsigma_next = (sigma + dt * w.downstep_scale).clamp_(0)
-        wratio = wsigma_next / sigma
+        wsigma_down, wsigma_up = self.get_ancestral_step(
+            w.eta,
+            sigma=sigma,
+            sigma_next=wsigma_next,
+            retry_increment=w.eta_retry_increment,
+        )
+        wratio = wsigma_down / sigma
         x_down = self.blend(ss.denoised, x, wratio)
+        if wsigma_up != 0:
+            x_down = yield from self.result(
+                x_down,
+                wsigma_up,
+                sigma_next=wsigma_next,
+                sigma_down=wsigma_down,
+                s_noise=w.s_noise,
+                noise_sampler=self.alt_noise_sampler,
+                final=False,
+            )
         mr_down = self.call_model(x_down, wsigma_next, call_index=1)
         coeffs = scale_wavelets(
             self.wavelet_forward(self.maybe_flatten(ss.denoised)),
