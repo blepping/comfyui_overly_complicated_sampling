@@ -351,39 +351,40 @@ post_filter: null
 In alphabetical order.
 
 * `adapter`: Wraps a normal ComfyUI `SAMPLER`. Attach a `SAMPLER` parameter to the node. Note: Samplers that do unusual stuff like try to manipulate the model won't work. ComfyUI's built-in CFG++ samplers in particular do not work here.
+* `blep_bas`: Batch Augmented Sampler. My own dumb experiment that expands the batch and averages the result. May be very slow/require a lot of VRAM. See parameters: `bas`
+* `blep_euler_cycle`: See parameters: `cycle_pct`.
+* `blep_weoon`: Wavelet-based second order sampler. Another dumb experiment. See parameters: `weoon`
 * `bogacki`: Bogacki-Shampine sampler. Also has a reversible variant.
+* `clybius_euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`.
+* `clybius_sens`: Reversible dpmpp_3m_sde variant. Supports a separate set of reversible parameters in `tsde_reversible`.
 * `deis`: See parameters: `history_limit`. Does not work well with ETA, I don't recommending leaving ETA at the default 1.
-* `extraltodeus_distance`: See parameters: `distance`. Adaptive-ish/configurable step variant of Heun. Taken from: https://github.com/Extraltodeus/DistanceSampler
+* `dpm2`: Set `eta: 0` for non-ancestral variant.
 * `dpmpp_2m_sde`: Also supports reversible parameters. See parameters: `history_limit`.
 * `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`.
 * `dpmpp_2s`
 * `dpmpp_3m_sde`: See parameters: `history_limit`.
 * `dpmpp_sde`
-* `dpm2`: Set `eta: 0` for non-ancestral variant.
-* `clybius_sens`
-* `blep_bas`: Batch Augmented Sampler. My own dumb experiment that expands the batch and averages the result. May be very slow/require a lot of VRAM. See parameters: `bas`
 * `dynamic`: Advanced step method that allows using an expression to determine the sampler parameters at each substep. See below for a more detailed explanation.
-* `euler_cycle`: See parameters: `cycle_pct`.
-* `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`.
 * `euler`: If samplers came in vanilla.
-* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`.
+* `extraltodeus_distance`: Adaptive-ish/configurable step variant of Heun. Referenced from [https://github.com/Extraltodeus/DistanceSampler](https://github.com/Extraltodeus/DistanceSampler). See parameters: `distance`.
 * `heun_1s`: Alternate Heun one step implementation. Supports reversible parameters.
+* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`.
 * `heunpp`: See parameters: `max_order`.
 * `ipndm_v`: See parameters: `history_limit`.
 * `ipndm`: See parameters: `history_limit`.
 * `res`: Refined Exponential Solver. I believe this is a variant of Heun. Generally works very well.
 * `reversible_bogacki`: Reversible variant of Bockacki-Shampine.
-* `reversible_heun`: Reversible variant of Heun.
 * `reversible_heun_1s`: Reversible variant of Heun 1 step. See parameters: `history_limit`.
+* `reversible_heun`: Reversible variant of Heun.
+* `rk_dynamic`: Variant of RK4 that lets you set `max_order` (you can also set it to `0` to choose an order dynamically, doesn't seem to work so well though).
 * `rk4`: Runge-Kutta 4th order sampler.
 * `rkf45`: 5 model call flavor of RK.
-* `rk_dynamic`: Variant of RK4 that lets you set `max_order` (you can also set it to `0` to choose an order dynamically, doesn't seem to work so well though).
 * `solver_diffrax`: Uses the [Diffrax](https://github.com/patrick-kidger/diffrax) solver backend. See `de_*` parameters below.
 * `solver_torchdiffeq`: Uses the [torchdiffeq](https://github.com/rtqichen/torchdiffeq) backend. See `de_*` parameters below.
 * `solver_torchode`: Uses the [torchode]((https://github.com/martenlienen/torchode)) backend. See `de_*` parameters below.
 * `solver_torchsde`: Uses the [torchsde](https://github.com/google-research/torchsde) backend. See `de_*` parameters below.
-* `trapezoidal`:
 * `trapezoidal_cycle`: See parameters: `cycle_pct`.
+* `trapezoidal`:
 * `ttm_jvp`: TTM is a weird sampler. If you're using model caching you must make sure the entries TTM uses are populated first (by having it run before any other samplers that call the model multiple times). It may also not work with some other model patches and upscale methods. See parameters: `alternate_phi_2_calc`
 
 **Sampler Feature Support**
@@ -391,36 +392,39 @@ In alphabetical order.
 |Name|Cost|History|Order|Reversible|CFG++|
 |-|-|-|-|-|-|
 |`adapter`|?|?|?|?|?|
+|`blep_bas`|variable|||||
+|`blep_euler_cycle`|1||||X|
+|`blep_trapezoidal_cycle`|2|||||
+|`blep_weoon`|2|||||
 |`bogacki`|2|||||
+|`clybius_euler_dancing`|1|||||
+|`clybius_sens`|1|1||||
 |`deis`|1|1-3 (1)||||
-|`distance`|variable|||||
 |`dpmpp_2m_sde`|1|1||||
 |`dpmpp_2m`|1|1||||
 |`dpmpp_2s`|2|||||
 |`dpmpp_3m_sde`|1|1-2 (2)||||
 |`dpmpp_sde`|2|||||
 |`dynamic`|?|?|?|?|?|
-|`euler_cycle`|1||||X|
-|`euler_dancing`|1|||||
 |`euler`|1||||X|
-|`heun`|2|||X||
+|`extraltodeus_distance`|variable|||||
 |`heun_1s`|1|1||X||
+|`heun`|2|||X||
 |`heunpp`|1-3||X|||
 |`ipndm_v`|1|1-3 (1)||||
 |`ipndm`|1|1-3 (1)||||
 |`res`|2|||||
 |`reversible_bogacki`|2|||X||
-|`reversible_heun`|2|||X||
 |`reversible_heun_1s`|1|1||X||
+|`reversible_heun`|2|||X||
+|`rk4`|1-4|||||
 |`rk4`|4|||||
 |`rkf45`|5|||||
-|`rk4`|1-4|||||
 |`solver_diffrax`|variable|||||
 |`solver_torchdiffeq`|variable|||||
 |`solver_torchode`|variable|||||
 |`solver_torchsde`|variable|||||
 |`trapezoidal`|2|||||
-|`trapezoidal_cycle`|2|||||
 |`ttm_jvp`|2|||||
 
 
@@ -611,7 +615,7 @@ diffrax_g_time_scaling: false
 # i.e. if you'd get 1,2,3,4 as g values for the step, with this it would be 1,2,-3,-4.
 diffrax_g_split_time_mode: false
 
-# blep_bas parameters
+# blep_bas sampler-specific parameters
 bas:
   # Batch expansion factor. Whatever your original batch size was will be multiplied
   # by this. If it's 0 then you just get normal Euler.
@@ -654,6 +658,56 @@ bas:
   # dt means you get bsigma + (sigma_next - bsigma) * tostep_factor
   # where bsigma = sigma * fromstep_factor
   tostep_source: dt
+
+# blep_weoon sampler-specific options.
+# Parameters with "inv" in the name apply to the inverse wavelet operation.
+# When set to null, they will use the normal setting.
+weoon:
+  start_step: 0
+  end_step: 9999
+  eta: 0.0
+  eta_retry_increment: 0.0
+  s_noise: 1.0
+  # One of dwt, dwt1d, dtcwt
+  wavelet_mode: dwt
+  # Padding scheme used for wavelets
+  padding: periodization
+  # Padding scheme used for the inverse wavelet operation
+  inv_padding: null
+  # Wavelet type. Does not apply if wavelet_mode is dtcwt.
+  wave: db4
+  # Wavelet type used for the inverse wavelet operation. Does not apply if wavelet_mode is dtcwt.
+  inv_wave: null
+  # dtcwt qshift parameter. Only applies if the wavelet mode is dtcwt.
+  dtcwt_qshift: qshift_a
+  # dtcwt biort parameter. Only applies if the wavelet mode is dtcwt.
+  dtcwt_biort: near_sym_a
+  # dtcwt qshift parameter used for the inverse wavelet operation. Only applies if the wavelet mode is dtcwt.
+  dtcwt_inv_qshift: null
+  # dtcwt biort parameter used for the inverse wavelet operation. Only applies if the wavelet mode is dtcwt.
+  dtcwt_inv_biort: null
+  # Can be used to stretch the step down. I.E. 1.0 would be sigma -> sigma_next
+  # while 2.0 would be twice the distance between sigma and sigma_next.
+  downstep_scale: 1.0
+  # Blend scale for the downstep denoised lowpass wavelets
+  yl_strength: 1.0
+  # Blend scale for the downstep denoised highpass wavelets
+  yh_strength: 0.5
+  # Mode used for blending wavelets.
+  wavelet_blend_mode: lerp
+  # Blend mode for wavelet highpass, uses wavelet_blend_mode if null.
+  wavelet_blend_mode_yh: null
+  # Extra multipliers that can be applied to the low/highpass wavelets for the normal
+  # denoised or downstep denoised.
+  denoised_yl_multiplier: 1.0
+  denoised_yh_multiplier: 1.0
+  denoised_down_yl_multiplier: 1.0
+  denoised_down_yh_multiplier: 1.0
+  # Only applies when wavelet_mode is dwt1d. Can be:
+  #   2: Flatten starting at spatial dimensions
+  #   1: Flatten starting at channels dimension
+  #   0: Smash everything together!
+  flatten_start_dim: 2
 
 ### Other Sampler Specific Parameters ###
 

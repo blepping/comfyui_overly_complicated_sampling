@@ -150,7 +150,9 @@ Available in model filters, with the exception of the `input` filter.
 
 **Note on `unsafe_tensor_method` and `unsafe_torch`**: These functions are disabled by default. If the environment variable `COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS` is set to anything then you can use `unsafe_tensor_method` with a whitelisted set of methods (best effort to avoid anything actually unsafe). If the environment variable `COMFYUI_OCS_ALLOW_ALL_UNSAFE` is set to anything then `unsafe_torch` is enabled and `unsafe_tensor_method` will allow calling any method. ***WARNING***: Allowing _all_ unsafe with workflows you don't trust is _not_ recommended and a malicious workflow will likely have access to anything ComfyUI can access. It is effectively the same as letting the workflow run an arbitrary script on your system.
 
-## Tensor Expression Functions
+Documentation TBD (check the source if you want to use them now): `t_copysign`, `t_gaussianblur2d`, `t_rgb_latent`, `t_snf_guidance`
+
+## Image Expression Functions
 
 `IMG` used here to donate the type for functions that take an image. This may actually be an image batch rather than a single image.
 
