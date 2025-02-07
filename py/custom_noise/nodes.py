@@ -383,6 +383,12 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                     "tooltip": "Blending function used when mixing immiscible noise with normal noise. Only slerp seems to work well (requires ComfyUI-bleh).",
                 },
             ),
+            "normalize": (
+                ("default", "forced", "disabled"),
+                {
+                    "tooltip": "Controls whether the generated noise is normalized to 1.0 strength.",
+                },
+            ),
             "custom_noise": (
                 WILDCARD_NOISE,
                 {
@@ -395,18 +401,40 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
 
     @classmethod
     def get_item_class(cls):
-        def wrapper(
-            factor: float, *, reference: dict, blend_mode: str, custom_noise, **kwargs
-        ):
-            return ImmiscibleReferenceItem(
-                factor,
-                reference=reference["samples"].clone(),
-                blend_function=BLENDING_MODES[blend_mode],
-                noise=custom_noise,
-                **kwargs,
-            )
+        return ImmiscibleReferenceItem
 
-        return wrapper
+    def go(
+        self,
+        *,
+        factor: float,
+        size: int,
+        batching: str,
+        normalize_ref_scale: float,
+        normalize_noise_scale: float,
+        maximize: bool,
+        distance_scale: float,
+        distance_scale_ref: float,
+        blend: float,
+        blend_mode: str,
+        normalize: bool | None,
+        custom_noise: object,
+        reference: dict,
+    ) -> tuple:
+        return super().go(
+            factor,
+            size=size,
+            batching=batching,
+            normalize_ref_scale=normalize_ref_scale,
+            normalize_noise_scale=normalize_noise_scale,
+            maximize=maximize,
+            distance_scale=distance_scale,
+            distance_scale_ref=distance_scale_ref,
+            blend=blend,
+            blend_function=BLENDING_MODES[blend_mode],
+            normalize=self.get_normalize(normalize),
+            noise=custom_noise,
+            reference=reference["samples"].clone(),
+        )
 
 
 class NoiseConditioningNode(metaclass=IntegratedNode):

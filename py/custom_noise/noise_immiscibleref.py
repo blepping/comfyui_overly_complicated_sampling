@@ -20,7 +20,7 @@ class ImmiscibleReferenceItem(CustomNoiseItemBase):
         noise,
         reference,
         blend_function,
-        normalized=None,
+        normalize=None,
     ):
         super().__init__(
             factor,
@@ -35,7 +35,7 @@ class ImmiscibleReferenceItem(CustomNoiseItemBase):
             blend_function=blend_function,
             noise=noise,
             reference=reference,
-            normalized=normalized,
+            normalize=normalize,
         )
 
     def clone_key(self, k):
