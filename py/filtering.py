@@ -22,16 +22,16 @@ FILTER = {}
 EXT_BLEH = None
 
 
-def init_integrations():
+def init_integrations(integrations):
     global BLENDING_MODES, FILTER, EXT_BLEH
-    EXT_BLEH = EXT.bleh
+    EXT_BLEH = integrations.bleh
     if EXT_BLEH is not None:
         BLENDING_MODES |= EXT_BLEH.latent_utils.BLENDING_MODES
         FILTER |= {
             "bleh_enhance": BlehEnhanceFilter,
             "bleh_ops": BlehOpsFilter,
         }
-    ext_sonar = EXT.sonar
+    ext_sonar = integrations.sonar
     if ext_sonar is not None:
         FILTER["sonar_power_filter"] = SonarPowerFilter
 

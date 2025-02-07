@@ -3,6 +3,7 @@ import torch
 
 from typing import Callable, Any
 
+from ..external import IntegratedNode
 from ..noise import scale_noise
 from ..nodes import WILDCARD_NOISE, NOISE_INPUT_TYPES_HINT
 
@@ -106,7 +107,7 @@ class CustomNoiseChain:
         return noise_sampler
 
 
-class CustomNoiseNodeBase(abc.ABC):
+class CustomNoiseNodeBase(metaclass=IntegratedNode):
     DESCRIPTION = "An Overly Complicated Sampling custom noise item."
     RETURN_TYPES = ("OCS_NOISE",)
     OUTPUT_TOOLTIPS = ("A custom noise chain.",)

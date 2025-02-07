@@ -82,6 +82,7 @@ class MergeSubstepsSampler:
             x = self.step(x)
         return self.step_output(x, orig_x=orig_x)
 
+    # From https://arxiv.org/abs/2210.05475
     def afs_step(self, x):
         sigma, sigma_next = self.ss.sigma, self.ss.sigma_next
         afs_d = x / ((1 + sigma**2).sqrt())

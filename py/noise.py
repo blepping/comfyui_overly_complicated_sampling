@@ -1,4 +1,5 @@
 import gc
+import math
 import random
 
 import scipy
@@ -43,20 +44,32 @@ class ImmiscibleNoise(Filter):
         if self.batching == "batch":
             return latent
         sz = latent.shape
-        if latent.ndim != 4:
-            raise ValueError("Both latent and reference must be four-dimensional")
+        # if latent.ndim != 4:
+        #     raise ValueError("Both latent and reference must be four-dimensional")
         if self.batching == "channel":
-            return latent.view(sz[0] * sz[1], *sz[2:])
+            return latent.reshape(sz[0] * sz[1], *sz[2:])
+        if self.batching == "frame":
+            if latent.ndim != 5:
+                raise ValueError(
+                    "Both latent and reference must be five-dimensional for frame mode"
+                )
+            return latent.permute(0, 2, 1, 3, 4).reshape(sz[0] * sz[2], sz[1], *sz[3:])
         if self.batching == "row":
-            return latent.view(sz[0] * sz[1] * sz[2], sz[3])
+            return latent.reshape(math.prod(sz[:-1]), sz[-1])
         if self.batching == "column":
+            if latent.ndim != 4:
+                raise ValueError(
+                    "Both latent and reference must be four-dimensional for column mode"
+                )
             return latent.permute(0, 1, 3, 2).reshape(sz[0] * sz[1] * sz[3], sz[2])
         raise ValueError("Bad Immmiscible noise batching type")
 
     def unbatch(self, latent, sz):
         if self.batching == "column":
-            return latent.view(*sz[:2], sz[3], sz[2]).permute(0, 1, 3, 2)
-        return latent.view(*sz)
+            return latent.reshape(*sz[:2], sz[3], sz[2]).permute(0, 1, 3, 2)
+        if self.batching == "frame":
+            return latent.reshape(sz[0], sz[2], sz[1], *sz[3:]).permute(0, 2, 1, 3, 4)
+        return latent.reshape(*sz)
 
     # Based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395
     # Idea for use with inference as well as implementation help from https://github.com/Clybius

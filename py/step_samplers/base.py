@@ -257,6 +257,7 @@ class SingleStepSampler:
         if self.uses_alt_noise:
             self.alt_noise_sampler = None
 
+    # From https://arxiv.org/abs/2210.05475
     def afs_step(self, x):
         sigma, sigma_next = self.ss.sigma, self.ss.sigma_next
         afs_d = x / ((1 + sigma**2).sqrt())

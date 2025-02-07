@@ -1,7 +1,7 @@
 import comfy
 import yaml
 
-from .external import MODULES
+from .external import MODULES, IntegratedNode
 from .restart import Restart
 from .sampling import composable_sampler
 from .step_samplers import STEP_SAMPLERS
@@ -64,7 +64,7 @@ NOISE_INPUT_TYPES_HINT = (
 DEFAULT_YAML_PARAMS = "# YAML/JSON parameters\n"
 
 
-class SamplerNode:
+class SamplerNode(metaclass=IntegratedNode):
     RETURN_TYPES = ("SAMPLER",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Overly Complicated Sampling main sampler node. Can be connected to a SamplerCustom or other sampler node that supports a SAMPLER input."
@@ -133,7 +133,7 @@ class SamplerNode:
         )
 
 
-class GroupNode:
+class GroupNode(metaclass=IntegratedNode):
     RETURN_TYPES = ("OCS_GROUPS",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Over Complicated Sampling group definition node."
@@ -248,7 +248,7 @@ class GroupNode:
         return (group,)
 
 
-class SubstepsNode:
+class SubstepsNode(metaclass=IntegratedNode):
     RETURN_TYPES = ("OCS_SUBSTEPS",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Overly Complicated Sampling substeps definition node. Used to define a sampler type and other sampler-specific parameters."
@@ -332,7 +332,7 @@ class SubstepsNode:
         return (chain,)
 
 
-class ParamNode:
+class ParamNode(metaclass=IntegratedNode):
     RETURN_TYPES = ("OCS_PARAMS",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Overly Complicated Sampling parameter definition node. Used to set parameters like custom noise types that require an input."
@@ -424,7 +424,7 @@ class ParamNode:
         return (params,)
 
 
-class MultiParamNode(ParamNode):
+class MultiParamNode(ParamNode, metaclass=IntegratedNode):
     RETURN_TYPES = ("OCS_PARAMS",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Overly Complicated Sampling parameter definition node. Used to set parameters like custom noise types that require an input. Like the OCS Param node but allows setting multiple parameters at the same time."
@@ -510,7 +510,7 @@ class MultiParamNode(ParamNode):
         return (params,)
 
 
-class SimpleRestartSchedule:
+class SimpleRestartSchedule(metaclass=IntegratedNode):
     RETURN_TYPES = ("SIGMAS",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Overly Complicated Sampling simple Restart schedule node. Allows generating a Restart sampling schedule based on a text definition."
@@ -573,7 +573,7 @@ class SimpleRestartSchedule:
         return (Restart.simple_schedule(sigmas, start_step, parsed_schedule),)
 
 
-class ModelSetMaxSigmaNode:
+class ModelSetMaxSigmaNode(metaclass=IntegratedNode):
     RETURN_TYPES = ("MODEL",)
     CATEGORY = "hacks"
     DESCRIPTION = "Allows forcing a model's maximum and minumum sigmas to a specified value. You generally do NOT want to connect this to a sampler node. Connect it to a scheduler node (i.e. BasicScheduler) instead."

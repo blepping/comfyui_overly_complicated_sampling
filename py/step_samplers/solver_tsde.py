@@ -3,6 +3,7 @@ import contextlib
 import torch
 import tqdm
 
+from . import registry
 from .solver_base import DESolverStep
 
 HAVE_TSDE = False
@@ -186,3 +187,6 @@ class TSDEStep(DESolverStep):
             pbar.update(0)
             pbar.close()
         yield from self.result(result, sigma_up, sigma_down=sigma_down)
+
+
+registry.add(TSDEStep)

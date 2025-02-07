@@ -3,6 +3,7 @@ import os
 import torch
 import numpy as np
 import PIL.Image as PILImage
+from functools import partial
 
 from . import expression as expr
 from . import latent
@@ -23,16 +24,16 @@ BLENDING_MODES = {
 HANDLERS = {}
 
 
-def init_integrations():
+def init_integrations(integrations):
     global EXT_BLEH, EXT_SONAR, BLENDING_MODES, HANDLERS
-    EXT_BLEH = EXT.bleh
-    EXT_SONAR = EXT.sonar
+    EXT_BLEH = integrations.bleh
+    EXT_SONAR = integrations.sonar
     if EXT_BLEH is not None:
         BLENDING_MODES |= EXT_BLEH.latent_utils.BLENDING_MODES
         HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
     if EXT_SONAR is not None:
         HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
-    if EXT.nnlatentupscale is not None:
+    if integrations.nnlatentupscale is not None:
         HANDLERS["t_scale_nnlatentupscale"] = ScaleNNLatentUpscaleHandler()
 
 
@@ -79,11 +80,24 @@ class RollHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numeric_scalar("amount", 0.5),
-        expr.Arg.numscalar_sequence("dim", (-2,)),
+        expr.Arg.one_of(
+            "dim",
+            (
+                expr.ValidateArg.validate_integer,
+                partial(
+                    expr.ValidateArg.validate_sequence,
+                    item_validator=expr.ValidateArg.validate_integer,
+                ),
+            ),
+            default=-2,
+        ),
+        # expr.Arg.numscalar_sequence("dim", (-2,)),
     )
 
     def handle(self, obj, getter):
         tensor, amount, dim = self.safe_get_all(obj, getter)
+        if not isinstance(dim, tuple):
+            dim = (dim,)
         if isinstance(amount, float) and amount < 1.0 and amount > -1.0:
             if len(dim) > 1:
                 raise ValueError(

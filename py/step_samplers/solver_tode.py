@@ -3,6 +3,7 @@ import contextlib
 import torch
 import tqdm
 
+from . import registry
 from .solver_base import DESolverStep
 
 
@@ -126,3 +127,6 @@ class TODEStep(DESolverStep):
             pbar.update(0)
             pbar.close()
         yield from self.result(result, sigma_up, sigma_down=sigma_down)
+
+
+registry.add(TODEStep)

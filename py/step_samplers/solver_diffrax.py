@@ -9,6 +9,7 @@ import tqdm
 
 import comfy
 
+from . import registry
 from .solver_base import DESolverStep
 
 HAVE_DIFFRAX = False
@@ -298,3 +299,6 @@ class DiffraxStep(DESolverStep):
         result = torch.cat(results).to(x)
         sigma_up, result = yield from self.adjusted_step(sn, result, mcc, sigma_up)
         yield from self.result(result, sigma_up, sigma_down=sigma_down)
+
+
+registry.add(DiffraxStep)

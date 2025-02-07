@@ -14,10 +14,10 @@ from .external import MODULES as EXT
 EXT_NNLATENTUPSCALE = None
 
 
-def init_integrations():
+def init_integrations(integrations):
     global get_noise_sampler, EXT_NNLATENTUPSCALE
 
-    ext_sonar = EXT.sonar
+    ext_sonar = integrations.sonar
     if ext_sonar is not None:
         get_noise_sampler = ext_sonar.noise.get_noise_sampler
     EXT_NNLATENTUPSCALE = EXT.nnlatentupscale

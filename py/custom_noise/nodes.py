@@ -10,8 +10,9 @@ import comfy.samplers
 from .base import CustomNoiseNodeBase, NormalizeNoiseNodeMixin
 from .noise_perlin import DEFAULTS as PERLIN_DEFAULTS
 from .noise_perlin import PerlinItem
+from .noise_immiscibleref import ImmiscibleReferenceItem
 
-from ..external import MODULES
+from ..external import MODULES, IntegratedNode
 from ..filtering import BLENDING_MODES
 from ..nodes import WILDCARD_NOISE, NOISE_INPUT_TYPES_HINT
 from ..utils import scale_noise
@@ -304,7 +305,111 @@ class PerlinSimpleNode(PerlinAdvancedNode):
         return wrapper
 
 
-class NoiseConditioningNode:
+class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
+    DESCRIPTION = "Immiscible noise that uses a latent reference."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        MODULES.initialize()
+        result = super().INPUT_TYPES(include_rescale=False, include_chain=False)
+        result["required"] |= {
+            "size": (
+                "INT",
+                {
+                    "default": 64,
+                    "min": 0,
+                    "tooltip": "Number of batch repeats to use when generating Immiscible noise. Setting this to 0 disables immiscible noise. If the batching type is batch, then Immiscible noise is also disabled unless the size is 2 or higher. Note that this size is in batch repeats regardless of the batching mode. For example, if you are generating a batch of 2 and you set this to 2, then you will generate noise with batch size 4.",
+                },
+            ),
+            "batching": (
+                (
+                    "channel",
+                    "batch",
+                    "row",
+                    "column",
+                    "frame",
+                ),
+                {
+                    "default": "channel",
+                    "tooltip": "Dimension to maximize (or minimize) the noise with. Column mode requires reshaping the input and may require a lot of VRAM. Row mode is also fairly slow, but not as bad as column mode. Row and column modes have a very strong effect.",
+                },
+            ),
+            "normalize_ref_scale": (
+                "FLOAT",
+                {
+                    "default": 0.0,
+                    "tooltip": "Controls whether the reference gets normalized. If set to 0, no normalization is done.",
+                },
+            ),
+            "normalize_noise_scale": (
+                "FLOAT",
+                {
+                    "default": 0.0,
+                    "tooltip": "Controls whether the noise used as an input for immiscible noise is gets normalized first. If set to 0, no normalization is done.",
+                },
+            ),
+            "maximize": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "When enabled, maximizes the distance between the noise and the reference rather than trying to minimize it.",
+                },
+            ),
+            "distance_scale": (
+                "FLOAT",
+                {
+                    "default": 0.1,
+                    "tooltip": "Multiplier on the input noise for v2 Immiscible noise. Set to 0 to use v1 Immiscible noise.",
+                },
+            ),
+            "distance_scale_ref": (
+                "FLOAT",
+                {
+                    "default": 0.1,
+                    "tooltip": "Multiplier on the refence for v2 Immiscible noise. No effect if distance_scale is 0.",
+                },
+            ),
+            "blend": (
+                "FLOAT",
+                {
+                    "default": 1.0,
+                    "tooltip": "Percentage of immiscible noise to use. 1.0 means 100%. May not work very well with most blend modes.",
+                },
+            ),
+            "blend_mode": (
+                tuple(BLENDING_MODES.keys()),
+                {
+                    "default": "lerp",
+                    "tooltip": "Blending function used when mixing immiscible noise with normal noise. Only slerp seems to work well (requires ComfyUI-bleh).",
+                },
+            ),
+            "custom_noise": (
+                WILDCARD_NOISE,
+                {
+                    "tooltip": "Input for custom noise used during ancestral or SDE sampling.",
+                },
+            ),
+            "reference": ("LATENT",),
+        }
+        return result
+
+    @classmethod
+    def get_item_class(cls):
+        def wrapper(
+            factor: float, *, reference: dict, blend_mode: str, custom_noise, **kwargs
+        ):
+            return ImmiscibleReferenceItem(
+                factor,
+                reference=reference["samples"].clone(),
+                blend_function=BLENDING_MODES[blend_mode],
+                noise=custom_noise,
+                **kwargs,
+            )
+
+        return wrapper
+
+
+class NoiseConditioningNode(metaclass=IntegratedNode):
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "go"
 
@@ -672,7 +777,7 @@ class NoiseConditioningNode:
         return (result,)
 
 
-class SamplerNodeConfigOverride:
+class SamplerNodeConfigOverride(metaclass=IntegratedNode):
     DESCRIPTION = "Allows overriding parameters of a SAMPLER, and specifically lets you use custom and/or Immiscible noise. For use with non-OCS samplers, not recommended to use with the OCS Sampler node as it has internal support for Immiscible noise."
 
     RETURN_TYPES = ("SAMPLER",)
@@ -704,6 +809,7 @@ class SamplerNodeConfigOverride:
                         "batch",
                         "row",
                         "column",
+                        "frame",
                         "cycle_channel_batch",
                         "cycle_row_column",
                         "cycle_channel_row",
