@@ -46,6 +46,7 @@ class ImmiscibleReferenceItem(CustomNoiseItemBase):
         return super().clone_key(k)
 
     def make_noise_sampler(self, x, *args, normalized=True, **kwargs):
+        factor = self.factor
         norm_noise_scale = self.normalize_noise_scale
         normalize = self.get_normalize("normalize", normalized)
 
@@ -90,6 +91,6 @@ class ImmiscibleReferenceItem(CustomNoiseItemBase):
                     immiscible_noise,
                     blend,
                 )
-            return scale_noise(immiscible_noise, normalized=normalize)
+            return scale_noise(immiscible_noise, factor, normalized=normalize)
 
         return noise_sampler
