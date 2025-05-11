@@ -326,6 +326,9 @@ def snf_guidance(
 
 class OCSLatentFormat:
     def __init__(self, device, latent_format):
+        if latent_format.latent_rgb_factors is None:
+            self.rgb_factors = None
+            return
         self.rgb_factors = torch.tensor(
             latent_format.latent_rgb_factors, device=device, dtype=torch.float
         ).t()
@@ -340,12 +343,16 @@ class OCSLatentFormat:
 
     def latent_to_rgb(self, latent: torch.Tensor) -> torch.Tensor:
         # NCHW -> NHWC
+        if self.latent_factors is None:
+            raise ValueError("No RGB factors for latent type!")
         return torch.nn.functional.linear(
             latent.movedim(1, -1), self.rgb_factors, bias=self.rgb_factors_bias
         )
 
     def rgb_to_latent(self, img: torch.Tensor) -> torch.Tensor:
         # NHWC
+        if self.latent_factors is None:
+            raise ValueError("No RGB factors for latent type!")
         if self.rgb_factors_bias is not None:
             img = img - self.rgb_factors_bias
         return torch.nn.functional.linear(img, self.rgb_factors_inv)

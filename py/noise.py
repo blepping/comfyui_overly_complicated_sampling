@@ -44,8 +44,6 @@ class ImmiscibleNoise(Filter):
         if self.batching == "batch":
             return latent
         sz = latent.shape
-        # if latent.ndim != 4:
-        #     raise ValueError("Both latent and reference must be four-dimensional")
         if self.batching == "channel":
             return latent.reshape(sz[0] * sz[1], *sz[2:])
         if self.batching == "frame":
