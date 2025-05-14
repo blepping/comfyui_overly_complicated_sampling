@@ -167,7 +167,7 @@ class ModelCallCache:
         self.extra_args = extra_args
         self.cfg1_uncond_optimization = cfg1_uncond_optimization
         self.cfg_scale_override = cfg_scale_override
-        self.is_rectified_flow = x.shape[1] == 16 and isinstance(
+        self.is_rectified_flow = isinstance(
             model.inner_model.inner_model.model_sampling, comfy.model_sampling.CONST
         )
         self.latent_format = OCSLatentFormat(
