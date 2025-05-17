@@ -1,12 +1,17 @@
 import comfy
 import yaml
 
+import torch
+
+from tqdm import tqdm
+
 from .external import MODULES, IntegratedNode
 from .restart import Restart
 from .sampling import composable_sampler
 from .step_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 from .substep_sampling import ParamGroup, StepSamplerChain, StepSamplerGroups
+from .filtering import make_filter
 
 try:
     from comfy_execution import validation as comfy_validation
@@ -18,7 +23,7 @@ except (ImportError, NotImplementedError):
     HAVE_COMFY_UNION_TYPE = False
 except Exception as exc:
     HAVE_COMFY_UNION_TYPE = False
-    print(
+    tqdm.write(
         f"** OCS: Warning, caught unexpected exception trying to detect ComfyUI union type support. Disabling. Exception: {exc}"
     )
 
@@ -666,10 +671,111 @@ class ModelSetMaxSigmaNode(metaclass=IntegratedNode):
                 "ModelSetMaxSigma: Invalid fake_min_sigma value, result max <= min"
             )
         model.add_object_patch("model_sampling", ms)
-        print(
-            f"ModelSetMaxSigma: Set model sigmas({mode}): old_max={orig_max_sigma:.04}, old_min={orig_min_sigma:.03}, new_max={new_max_sigma:.04}, new_min={new_min_sigma:.03}"
+        tqdm.write(
+            f"OCS: ModelSetMaxSigma: Set model sigmas({mode}): old_max={orig_max_sigma:.04}, old_min={orig_min_sigma:.03}, new_max={new_max_sigma:.04}, new_min={new_min_sigma:.03}"
         )
         return (model,)
+
+
+class ApplyExpressionLatent(metaclass=IntegratedNode):
+    RETURN_TYPES = ("LATENT",)
+    CATEGORY = "sampling/custom_sampling/OCS"
+    DESCRIPTION = "Allows applying an OCS filter to any latent. Define a filter block in yaml_config."
+
+    FUNCTION = "go"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": (
+                    "LATENT",
+                    {
+                        "tooltip": "Latent input. Note: This node does not care about masks.",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "tooltip": "Seed to use for generated noise.",
+                    },
+                ),
+                "yaml_config": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "placeholder": """\
+# YAML or JSON filter definition
+""",
+                        "multiline": True,
+                        "dynamicPrompts": False,
+                        "tooltip": "Enter your filter definition here. There is essentially no error handling.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def get_latent_samples(cls, latent: dict) -> torch.Tensor:
+        samples = latent["samples"]
+        batch_indexes = latent.get("batch_index")
+        if batch_indexes is None:
+            return samples.clone()
+        return samples[tuple(batch_indexes), ...].clone()
+
+    def go(self, *, latent: dict, seed: int, yaml_config: str) -> tuple:
+        MODULES.initialize()
+        torch.manual_seed(seed)
+        samples = self.get_latent_samples(latent)
+        config = yaml.safe_load(yaml_config)
+        if not config:
+            return ({"samples": samples},)
+        if not isinstance(config, dict) or "filter" not in config:
+            raise ValueError(
+                "Bad YAML config type (must be object) or missing filter key in config"
+            )
+        filter_def = config.get("filter")
+        if not isinstance(filter_def, dict):
+            raise ValueError("Bad type for filter definition, must be object")
+        ocs_filter = make_filter(filter_def)
+        new_samples = ocs_filter.apply(samples).to(samples)
+        return ({"samples": new_samples},)
+
+
+class ApplyExpressionImage(ApplyExpressionLatent):
+    DESCRIPTION = "Allows applying an OCS filter to any image. Define a filter block in yaml_config."
+    RETURN_TYPES = ("IMAGE",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        result = super().INPUT_TYPES()
+        del result["required"]["latent"]
+        result["required"] = {
+            "image": (
+                "IMAGE",
+                {"tooltip": "Image input."},
+            ),
+        } | result["required"]
+        return result
+
+    def go(self, *, image: torch.Tensor, seed: int, yaml_config: str) -> tuple:
+        image = image.clone()
+        if image.ndim == 3:
+            image = image.unsqueeze(0)
+        result = (
+            super()
+            .go(
+                latent={"samples": image.movedim(-1, 1)},
+                seed=seed,
+                yaml_config=yaml_config,
+            )[0]["samples"]
+            .movedim(1, -1)
+            .to(image)
+        )
+        return (result,)
 
 
 __all__ = (

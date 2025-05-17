@@ -283,7 +283,7 @@ class S_Handler(BaseHandler):
     input_validators = (
         Arg.integer("start", None),
         Arg.integer("end", None),
-        Arg.integer("step", None),
+        Arg.integer("step", 1),
     )
 
     def handle(self, obj, getter):

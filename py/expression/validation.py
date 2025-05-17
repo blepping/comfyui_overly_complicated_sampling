@@ -53,6 +53,10 @@ class Arg:
         )
 
     @classmethod
+    def tensor_slice(cls, name, default=Empty):
+        return cls(name, default=default, validator=ValidateArg.validate_tensor_slice)
+
+    @classmethod
     def sequence(cls, name, default=Empty, *, item_validator=None):
         return cls(
             name,
@@ -132,6 +136,14 @@ class ValidateArg:
         return val
 
     @classmethod
+    def validate_tensor_slice_item(cls, idx, val):
+        if not (val is Ellipsis or isinstance(val, (int, slice))):
+            raise ValidateError(
+                f"Expected int, slice or ellipsis argument at {idx}, got {type(val)}"
+            )
+        return val
+
+    @classmethod
     def validate_integer(cls, idx, val):
         if not isinstance(val, int):
             raise ValidateError(f"Expected integer argument at {idx}, got {type(val)}")
@@ -168,20 +180,11 @@ class ValidateArg:
             idx, val, item_validator=cls.validate_numeric_scalar
         )
 
-    # @classmethod
-    # def validate_numscalar_sequence(cls, idx, val):
-    #     if not isinstance(val, (list, tuple)):
-    #         raise ValidateError(f"Expected sequence argument at {idx}, got {type(val)}")
-    #     try:
-    #         _ = all(
-    #             cls.validate_numeric_scalar(f"{idx}[{i}]", v) is not None
-    #             for i, v in enumerate(val)
-    #         )
-    #     except ValidateError as exc:
-    #         raise ValidateError(
-    #             f"Expected numeric sequence argument at {idx}, got {type(val)}: {exc}"
-    #         )
-    #     return val
+    @classmethod
+    def validate_tensor_slice(cls, idx, val):
+        return cls.validate_sequence(
+            idx, val, item_validator=cls.validate_tensor_slice_item
+        )
 
     @classmethod
     def validate_string(cls, idx, val):

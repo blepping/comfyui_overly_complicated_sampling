@@ -1,6 +1,8 @@
 import re
 import operator
 
+from tqdm import tqdm
+
 from .parser import Parser, ParserSpec, ParseError
 from .types import (
     Empty,
@@ -58,7 +60,7 @@ class Expression:
 
     def eval(self, handlers, *args, **kwargs):
         if self.expr != ExpOp("default"):
-            print("\nEVAL", self.expr)
+            tqdm.write(f"* OCS: EVAL: {self.expr}")
         if not isinstance(self.expr, ExpBase):
             return self.expr
         return self.expr.eval(handlers, *args, **kwargs)

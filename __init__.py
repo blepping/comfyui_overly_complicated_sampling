@@ -9,5 +9,7 @@ NODE_CLASS_MAPPINGS = {
     "OCS MultiParam": nodes.MultiParamNode,
     "OCS ModelSetMaxSigma": nodes.ModelSetMaxSigmaNode,
     "OCS SimpleRestartSchedule": nodes.SimpleRestartSchedule,
+    "OCS ApplyExpressionLatent": nodes.ApplyExpressionLatent,
+    "OCS ApplyExpressionImage": nodes.ApplyExpressionImage,
 } | custom_noise.NODE_CLASS_MAPPINGS
 __all__ = ["NODE_CLASS_MAPPINGS"]

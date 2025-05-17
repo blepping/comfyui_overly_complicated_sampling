@@ -51,6 +51,64 @@ def scale_noise(
     return noise.sub_(noise.mean(dim=normalize_dims, keepdim=True)).mul_(factor)
 
 
+# Initial version based on Studentt distribution normalizatino from https://github.com/Clybius/ComfyUI-Extra-Samplers/
+def quantile_normalize(
+    noise: torch.Tensor,
+    *,
+    quantile: float = 0.75,
+    dim: int | None = 1,
+    flatten: bool = True,
+    nq_fac: float = 1.0,
+    pow_fac: float = 0.5,
+) -> torch.Tensor:
+    if quantile is None or quantile <= 0 or quantile >= 1:
+        return noise
+    orig_shape = noise.shape
+    if isinstance(quantile, (tuple, list)):
+        quantile = torch.tensor(
+            quantile,
+            device=noise.device,
+            dtype=noise.dtype,
+        )
+    qdim = dim if dim >= 0 else noise.ndim + dim
+    if qdim < 0:
+        raise ValueError("Negative dimension out of range")
+    if noise.ndim > 1 and flatten:
+        if qdim is not None and qdim >= noise.ndim:
+            qdim = 1 if noise.ndim > 2 else None
+        if qdim is None:
+            flatdim = 0
+        elif qdim in {0, 1}:
+            flatdim = qdim + 1
+        elif qdim in {2, 3}:
+            noise = noise.movedim(qdim, 1)
+            tempshape = noise.shape
+            flatdim = 2
+        else:
+            raise ValueError(
+                "Cannot handling quantile normalization flattening dims > 3",
+            )
+    else:
+        flatdim = None
+    nq = torch.quantile(
+        (noise if flatdim is None else noise.flatten(start_dim=flatdim)).abs(),
+        quantile,
+        dim=-1,
+    )
+    nq_shape = tuple(nq.shape) + (1,) * (noise.ndim - nq.ndim)
+    nq = nq.mul_(nq_fac).reshape(*nq_shape)
+    noise = noise.clamp(-nq, nq)
+    noise = torch.copysign(
+        torch.pow(torch.abs(noise), pow_fac),
+        noise,
+    )
+    if flatdim is not None and qdim in {2, 3}:
+        return (
+            noise.reshape(tempshape).movedim(1, qdim).reshape(orig_shape).contiguous()
+        )
+    return noise
+
+
 # def scale_noise(
 #     noise,
 #     factor=1.0,

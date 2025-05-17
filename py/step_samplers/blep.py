@@ -159,14 +159,17 @@ class AdapterStep(SingleStepSampler):
 class CycleSingleStepSampler(SingleStepSampler):
     default_eta = 0.0
 
-    def __init__(self, *, cycle_pct=0.25, **kwargs):
+    def __init__(self, *, cycle_pct=0.25, cycle_adjust_scales=True, **kwargs):
         super().__init__(**kwargs)
         if cycle_pct < 0:
             raise ValueError("cycle_pct must be positive")
         self.cycle_pct = cycle_pct
+        self.cycle_adjust_scales = cycle_adjust_scales
 
     def get_cycle_scales(self, sigma_next):
         keep_scale = 1 - self.cycle_pct
+        if not self.cycle_adjust_scales:
+            return self.cycle_pct
         add_scale = ((sigma_next**2.0 - (keep_scale * sigma_next) ** 2.0) ** 0.5) * (
             0.95 + 0.25 * self.cycle_pct
         )
