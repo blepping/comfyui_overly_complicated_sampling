@@ -327,7 +327,8 @@ class NoiseHandler(NormHandler):
         t, typ = self.safe_get_all(obj, getter)
         ctx = getter.ctx
         smin, smax, s, sn = (
-            ctx.get_var(k) for k in ("sigma_min", "sigma_max", "sigma", "sigma_next")
+            ctx.get_var(k, default=0.0)
+            for k in ("sigma_min", "sigma_max", "sigma", "sigma_next")
         )
         ns = latent.get_noise_sampler(typ, t, smin, smax, normalized=False)
         return ns(s, sn)

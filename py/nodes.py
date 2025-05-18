@@ -741,7 +741,7 @@ class ApplyFilterLatent(metaclass=IntegratedNode):
         if not isinstance(filter_def, dict):
             raise ValueError("Bad type for filter definition, must be object")
         ocs_filter = make_filter(filter_def)
-        new_samples = ocs_filter.apply(samples).to(samples)
+        new_samples = ocs_filter.apply(samples.to(dtype=torch.float32)).to(samples)
         return ({"samples": new_samples},)
 
 
