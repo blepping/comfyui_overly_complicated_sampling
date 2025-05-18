@@ -677,7 +677,7 @@ class ModelSetMaxSigmaNode(metaclass=IntegratedNode):
         return (model,)
 
 
-class ApplyExpressionLatent(metaclass=IntegratedNode):
+class ApplyFilterLatent(metaclass=IntegratedNode):
     RETURN_TYPES = ("LATENT",)
     CATEGORY = "sampling/custom_sampling/OCS"
     DESCRIPTION = "Allows applying an OCS filter to any latent. Define a filter block in yaml_config."
@@ -745,7 +745,7 @@ class ApplyExpressionLatent(metaclass=IntegratedNode):
         return ({"samples": new_samples},)
 
 
-class ApplyExpressionImage(ApplyExpressionLatent):
+class ApplyFilterImage(ApplyFilterLatent):
     DESCRIPTION = "Allows applying an OCS filter to any image. Define a filter block in yaml_config."
     RETURN_TYPES = ("IMAGE",)
 

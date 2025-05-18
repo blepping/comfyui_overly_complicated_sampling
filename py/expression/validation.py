@@ -137,9 +137,9 @@ class ValidateArg:
 
     @classmethod
     def validate_tensor_slice_item(cls, idx, val):
-        if not (val is Ellipsis or isinstance(val, (int, slice))):
+        if not (val in {Ellipsis, None} or isinstance(val, (int, slice))):
             raise ValidateError(
-                f"Expected int, slice or ellipsis argument at {idx}, got {type(val)}"
+                f"Expected none, int, slice or ellipsis argument at {idx}, got {type(val)}"
             )
         return val
 
@@ -196,6 +196,12 @@ class ValidateArg:
     def validate_boolean(cls, idx, val):
         if val is not True and val is not False:
             raise ValidateError(f"Expected boolean argument at {idx}, got {type(val)}")
+        return val
+
+    @classmethod
+    def validate_none(cls, idx, val):
+        if val is not None:
+            raise ValidateError(f"Expected none argument at {idx}, got {type(val)}")
         return val
 
     @classmethod

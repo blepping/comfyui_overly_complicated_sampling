@@ -281,8 +281,16 @@ class GetHandler(BaseHandler):
 
 class S_Handler(BaseHandler):
     input_validators = (
-        Arg.integer("start", None),
-        Arg.integer("end", None),
+        Arg.one_of(
+            "start",
+            (ValidateArg.validate_none, ValidateArg.validate_integer),
+            default=None,
+        ),
+        Arg.one_of(
+            "end",
+            (ValidateArg.validate_none, ValidateArg.validate_integer),
+            default=None,
+        ),
         Arg.integer("step", 1),
     )
 
