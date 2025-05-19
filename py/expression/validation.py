@@ -67,6 +67,16 @@ class Arg:
         )
 
     @classmethod
+    def nested_sequence(cls, name, default=Empty, *, item_validator=None):
+        return cls(
+            name,
+            default=default,
+            validator=functools.partial(
+                ValidateArg.validate_nested_sequence, item_validator=item_validator
+            ),
+        )
+
+    @classmethod
     def string(cls, name, default=Empty):
         return cls(name, default=default, validator=ValidateArg.validate_string)
 
@@ -102,7 +112,10 @@ class ValidateArg:
 
     def __init__(self, name, *args, kwargslist=(), group=all, **kwargs):
         if not isinstance(name, (list, tuple)):
-            return self.__init__((name,), (args,), group=group, kwargslist=kwargs)
+            name = (name,)
+            args = ((args,),)
+            kwargslist = kwargs
+            kwargs = {}
         self.valfuns = (getattr(self, f"validate_{n}", None) for n in name)
         if not all(self.valfuns):
             raise ValueError("Unknown validator")
@@ -172,7 +185,29 @@ class ValidateArg:
         try:
             return tuple(item_validator(iidx, v) for iidx, v in enumerate(val))
         except ValidateError as exc:
-            raise ValidateError(f"Item validation failed for in sequence: {exc}")
+            raise ValidateError(
+                f"Item validation failed for sequence argument at {idx}: {exc}"
+            )
+
+    @classmethod
+    def validate_nested_sequence(cls, idx, val, *, item_validator=None, depth=0):
+        if not isinstance(val, (list, tuple)):
+            raise ValidateError(
+                f"Expected nested sequence argument at {idx}, depth {depth} but got {type(val)}"
+            )
+        try:
+            return tuple(
+                cls.validate_nested_sequence(
+                    idx, v, item_validator=item_validator, depth=depth + 1
+                )
+                if isinstance(v, (list, tuple))
+                else (item_validator(iidx, v) if item_validator is not None else v)
+                for iidx, v in enumerate(val)
+            )
+        except ValidateError as exc:
+            raise ValidateError(
+                f"Item validation failed for nested sequence argument at {idx}, depth {depth}: {exc}"
+            )
 
     @classmethod
     def validate_numscalar_sequence(cls, idx, val):

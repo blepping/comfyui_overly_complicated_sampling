@@ -147,6 +147,22 @@ class IndexedCopyHandler(NormHandler):
         return result
 
 
+class NewLikeHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.nested_sequence(
+            "values",
+            default=(),
+            item_validator=expr.ValidateArg.validate_numeric_scalar,
+        ),
+    )
+
+    def handle(self, obj, getter):
+        tensor, values = self.safe_get_all(obj, getter)
+        print(f"\nNEW TENSOR: {values}")
+        return torch.tensor(values, dtype=tensor.dtype, device=tensor.device)
+
+
 class MeanHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
@@ -617,6 +633,7 @@ TENSOR_OP_HANDLERS = {
     "t_cat": CatHandler(),
     "t_stack": StackHandler(),
     "t_indexed_copy": IndexedCopyHandler(),
+    "t_new_like": NewLikeHandler(),
     "t_mean": MeanHandler(),
     "t_std": StdHandler(),
     "t_blend": BlendHandler(),
