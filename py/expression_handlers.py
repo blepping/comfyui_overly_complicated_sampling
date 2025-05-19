@@ -159,7 +159,6 @@ class NewLikeHandler(NormHandler):
 
     def handle(self, obj, getter):
         tensor, values = self.safe_get_all(obj, getter)
-        print(f"\nNEW TENSOR: {values}")
         return torch.tensor(values, dtype=tensor.dtype, device=tensor.device)
 
 

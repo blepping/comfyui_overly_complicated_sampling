@@ -97,6 +97,11 @@ class Expression:
 
     @classmethod
     def tokenize(cls, s):
+        s = "\n".join(
+            line.rstrip("\r")
+            for line in s.split("\n")
+            if not line.lstrip().startswith("#")
+        )
         yield from (cls.fixup_token(m.group(1)) for m in cls.EXPR_RE.finditer(s))
 
 
