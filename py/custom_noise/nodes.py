@@ -63,6 +63,8 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 "FLOAT",
                 {
                     "default": PERLIN_DEFAULTS.detail_level,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls the detail level of the noise when break_pattern is non-zero. No effect when using 100% raw Perlin noise.",
                 },
             ),
@@ -126,6 +128,8 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 "FLOAT",
                 {
                     "default": PERLIN_DEFAULTS.break_pattern,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Applies a function to break the Perlin pattern, making it more like normal noise. The value is the blend strength, where 1.0 indicates 100% pattern broken noise and 0.5 indicates 50% raw noise and 50% pattern broken noise. Generally should be at least 0.9 unless you want to generate colorful blobs.",
                 },
             ),
@@ -220,6 +224,8 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 "FLOAT",
                 {
                     "default": PERLIN_DEFAULTS.initial_amplitude,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls the amplitude for the first octave.",
                 },
             ),
@@ -227,6 +233,8 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 "FLOAT",
                 {
                     "default": PERLIN_DEFAULTS.initial_frequency[0],
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls the frequency for the first octave for the this axis.",
                 },
             ),
@@ -234,6 +242,8 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 "FLOAT",
                 {
                     "default": PERLIN_DEFAULTS.initial_frequency[1],
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls the frequency for the first octave for the this axis.",
                 },
             ),
@@ -241,6 +251,8 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 "FLOAT",
                 {
                     "default": PERLIN_DEFAULTS.initial_frequency[2],
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls the frequency for the first octave for the this axis.",
                 },
             ),
@@ -338,6 +350,8 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                 "FLOAT",
                 {
                     "default": 0.0,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls whether the reference gets normalized. If set to 0, no normalization is done.",
                 },
             ),
@@ -345,6 +359,8 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                 "FLOAT",
                 {
                     "default": 0.0,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Controls whether the noise used as an input for immiscible noise is gets normalized first. If set to 0, no normalization is done.",
                 },
             ),
@@ -359,6 +375,8 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                 "FLOAT",
                 {
                     "default": 0.1,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Multiplier on the input noise for v2 Immiscible noise. Set to 0 to use v1 Immiscible noise.",
                 },
             ),
@@ -366,6 +384,8 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                 "FLOAT",
                 {
                     "default": 0.1,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Multiplier on the refence for v2 Immiscible noise. No effect if distance_scale is 0.",
                 },
             ),
@@ -373,6 +393,8 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                 "FLOAT",
                 {
                     "default": 1.0,
+                    "min": -10000.0,
+                    "max": 10000.0,
                     "tooltip": "Percentage of immiscible noise to use. 1.0 means 100%. May not work very well with most blend modes.",
                 },
             ),
@@ -462,6 +484,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 0.01,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Blend strength of noise to be added to conditioning as a percentage where 1.0 would indicate 100%.",
                     },
                 ),
@@ -469,6 +493,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 0.01,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Blend strength of noise to be added to pooled conditioning as a percentage where 1.0 would indicate 100%.",
                     },
                 ),
@@ -490,6 +516,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 1.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Strength of the generated noise to be added to conditioning.",
                     },
                 ),
@@ -497,6 +525,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 1.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Strength of the generated noise to be added to pooled conditioning.",
                     },
                 ),
@@ -504,6 +534,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 1.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Multiplier applied to conditioning tensors.",
                     },
                 ),
@@ -511,6 +543,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 1.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Multiplier applied to pooled conditioning tensors.",
                     },
                 ),
@@ -865,6 +899,8 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 0.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Controls whether the reference gets normalized. If set to 0, no normalization is done.",
                     },
                 ),
@@ -872,6 +908,8 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 0.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Controls whether the noise used as an input for immiscible noise is gets normalized first. If set to 0, no normalization is done.",
                     },
                 ),
@@ -886,6 +924,8 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 0.1,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Multiplier on the input noise for v2 Immiscible noise. Set to 0 to use v1 Immiscible noise.",
                     },
                 ),
@@ -893,6 +933,8 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 0.1,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Multiplier on the refence for v2 Immiscible noise. No effect if immiscible_distance_scale is 0.",
                     },
                 ),
@@ -900,6 +942,8 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     "FLOAT",
                     {
                         "default": 1.0,
+                        "min": -10000.0,
+                        "max": 10000.0,
                         "tooltip": "Percentage of immiscible noise to use. 1.0 means 100%. May not work very well with most blend modes.",
                     },
                 ),

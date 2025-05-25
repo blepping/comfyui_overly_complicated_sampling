@@ -24,16 +24,19 @@ _Note for Flux users_: Set `cfg1_uncond_optimization: true` in the `model` block
 
 ## Credits
 
-I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
+I can move code around but sampling math and creating samplers generally beyond my ability. I didn't write any of the original samplers:
 
-* Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
+* Euler, Heun++2, DPMPP SDE, DPMPP 2S, gradient estimation, RES multistep, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
 * Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4, RKF45, dynamic RK(4), SENS and Euler Dancing samplers based on implementation from [https://github.com/Clybius/ComfyUI-Extra-Samplers](https://github.com/Clybius/ComfyUI-Extra-Samplers).
 * TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
 * Distance sampler based on implementation from https://github.com/Extraltodeus/DistanceSampler
 * IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
+* PingPong sampler idea from https://github.com/ace-step/ACE-Step/ (implementation also referenced from that source).
 * Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
 * Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and https://github.com/yhli123/Immiscible-Diffusion - idea for sampling with it and implementation help from https://github.com/Clybius
 * Precedence climbing (Pratt) expression parser based on implementation from https://github.com/andychu/pratt-parsing-demo
+
+Please notify me if I somehow missed appropriately crediting any code used here, any such ommissions are unintentional.
 
 This repo wouldn't be possible without building on the work of others. Thanks!
 
@@ -184,32 +187,22 @@ noise:
     filter: null
 
 
-# Model calls can be cached. This is very experimental: I don't recommend using it
-# unless you know what you're doing.
 model:
     # When enabled, skips generating uncond when you have CFG set to 1. Disabled by
     # default as stuff like CFG++ won't work without uncond. Useful to enable for
     # models like Flux that don't actually use CFG.
     cfg1_uncond_optimization: false
 
-    cache:
-        # The cache size.
-        size: 0
-
-        # Threshold for model call caching. For example if you have size=3 and threshold=1
-        # then model calls 1 through 3 will be cached, but model call 0 will not be (the first one).
-        # Additional explanation: Some samplers call the model multiple times per step. For example,
-        # Bogacki uses three model calls: 0, 1, 2
-        threshold: 1
-
-        # Maximum use count for cache items.
-        max_use: 1000000
-
     filter:
+        # Input to the model
         input: null
+        # Result after CFG calculation
         denoised: null
+        # Result after CFG calculation for JVP
         jdenoised: null
+        # Cond - positive prompt
         cond: null
+        # Uncond - negative prompt
         uncond: null
 ```
 
@@ -408,6 +401,7 @@ In alphabetical order.
 |`dynamic`|?|?|?|?|?|
 |`euler`|1||||X|
 |`extraltodeus_distance`|variable|||||
+|`gradient_estimation`|1|1||||
 |`heun_1s`|1|1||X||
 |`heun`|2|||X||
 |`heunpp`|1-3||X|||
@@ -428,7 +422,7 @@ In alphabetical order.
 |`ttm_jvp`|2|||||
 
 
-`deis`, `ipndm*` do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
+`deis`, `ipndm*` and `gradient_estimation` do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
 
 **Solver Backend Samplers**:
 

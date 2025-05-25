@@ -3,6 +3,7 @@ from . import (  # noqa: F401
     blep,
     clybius,
     extraltodeus,
+    misc,
     solver_tde,
     solver_tode,
     solver_tsde,

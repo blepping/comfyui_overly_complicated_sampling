@@ -394,6 +394,31 @@ class DEISStep(HistorySingleStepSampler):
         yield from self.result(x + noise)
 
 
+# https://openreview.net/pdf?id=o2ND9v0CeK
+# Implementation referenced from ComfyUI
+class GradientEstimationStep(HistorySingleStepSampler):
+    name = "gradient_estimation"
+    ancestralize = False
+    default_history_limit, max_history = 1, 1
+    default_eta = 0.0
+
+    def __init__(self, *args, ge_gamma=2.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ge_gamma = ge_gamma
+
+    def step(self, x):
+        ss = self.ss
+        sigma_down, sigma_up = self.get_ancestral_step(self.get_dyn_eta())
+        dt = sigma_down - ss.sigma
+        d = self.to_d(ss.hcur)
+        if self.available_history() < 1:
+            noise_pred = dt * d  # Euler
+        else:
+            gamma = self.ge_gamma
+            noise_pred = dt * (gamma * d + (1 - gamma) * ss.hist[-2].d)
+        yield from self.result(x + noise_pred, sigma_up, sigma_down=sigma_down)
+
+
 class HeunPP2Step(SingleStepSampler):
     name = "heunpp2"
     ancestralize = True
@@ -451,6 +476,54 @@ class DPM2Step(SingleStepSampler):
         yield from self.result(x + d_2 * dt_2, sigma_up)
 
 
+# Referenced from ComfyUI implementation
+class RESMultistepStep(HistorySingleStepSampler, DPMPPStepMixin):
+    name = "res_multistep"
+    default_history_limit, max_history = 1, 1
+    default_eta = 0.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def phi1_fn(t: torch.Tensor) -> torch.Tensor:
+        return t.expm1() / t
+
+    @classmethod
+    def phi2_fn(cls, t: torch.Tensor) -> torch.Tensor:
+        return (cls.phi1_fn(t) - 1.0) / t
+
+    def step(self, x):
+        ss = self.ss
+        sigma = ss.sigma
+        eta = self.get_dyn_eta()
+        sigma_down, sigma_up = self.get_ancestral_step(eta)
+        if self.available_history() == 0:
+            dt = sigma_down - sigma
+            d = self.to_d(ss.hcur)
+            return (yield from self.result(x + dt * d, sigma_up, sigma_down=sigma_down))
+        prev_mr = ss.hist[-2]
+        prev_sigma_down = self.get_ancestral_step(
+            sigma=prev_mr.sigma, sigma_next=sigma, eta=eta
+        )[0]
+        # Second order multistep method in https://arxiv.org/pdf/2308.02157
+        t, t_old, t_next, t_prev = (
+            self.t_fn(sigma),
+            self.t_fn(prev_sigma_down),
+            self.t_fn(sigma_down),
+            self.t_fn(prev_mr.sigma),
+        )
+        h = t_next - t
+        h_s = self.sigma_fn(h)
+        c2 = (t_prev - t_old) / h
+
+        phi1_val, phi2_val = self.phi1_fn(-h), self.phi2_fn(-h)
+        b1 = torch.nan_to_num(phi1_val - phi2_val / c2, nan=0.0)
+        b2 = torch.nan_to_num(phi2_val / c2, nan=0.0)
+        result = h_s * x + h * (b1 * ss.denoised + b2 * prev_mr.denoised)
+        yield from self.result(result, sigma_up, sigma_down=sigma_down)
+
+
 registry.add(
     DEISStep,
     DPMPP2MSDEStep,
@@ -461,6 +534,8 @@ registry.add(
     HeunPP2Step,
     IPNDMStep,
     IPNDMVStep,
+    GradientEstimationStep,
     DPM2Step,
     DPMPP2SStep,
+    RESMultistepStep,
 )

@@ -169,7 +169,7 @@ class CycleSingleStepSampler(SingleStepSampler):
     def get_cycle_scales(self, sigma_next):
         keep_scale = 1 - self.cycle_pct
         if not self.cycle_adjust_scales:
-            return self.cycle_pct
+            return keep_scale, self.cycle_pct
         add_scale = ((sigma_next**2.0 - (keep_scale * sigma_next) ** 2.0) ** 0.5) * (
             0.95 + 0.25 * self.cycle_pct
         )

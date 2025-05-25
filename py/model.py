@@ -1,5 +1,3 @@
-from collections import namedtuple
-
 import torch
 
 import comfy
@@ -44,12 +42,14 @@ class ModelResult:
         sigma,
         x,
         denoised,
+        have_uncond=True,
         **kwargs,
     ):
         self.call_idx = call_idx
         self.sigma = sigma
         self.x = x
         self.denoised = denoised
+        self.have_uncond = have_uncond
         for k in ("denoised_uncond", "denoised_cond", "tangents", "jdenoised"):
             setattr(self, k, kwargs.pop(k, None))
         if len(kwargs) != 0:
@@ -136,11 +136,6 @@ class ModelResult:
         return torch.linalg.norm(d_pred.sub_(d)).div_(torch.linalg.norm(d)).item()
 
 
-ModelCallCacheConfig = namedtuple(
-    "ModelCallCacheConfig", ("size", "max_use", "threshold"), defaults=(0, 1000000, 1)
-)
-
-
 class ModelCallCache:
     def __init__(
         self,
@@ -149,15 +144,22 @@ class ModelCallCache:
         s_in: torch.Tensor,
         extra_args: dict,
         *,
-        cache: None | dict = None,
-        filter: None | dict = None,
+        cache: dict | None = None,
+        filter: dict | None = None,
         cfg1_uncond_optimization: bool = False,
-        cfg_scale_override: None | int | float = None,
+        cfg_scale_override: int | float | None = None,
     ) -> None:
-        self.cache = ModelCallCacheConfig(**fallback(cache, {}))
         filtargs = fallback(filter, {}).copy()
         self.filters = {}
-        for key in ("input", "denoised", "jdenoised", "cond", "uncond", "x"):
+        for key in (
+            "input",
+            "denoised",
+            "jdenoised",
+            "cond",
+            "uncond",
+            "postcfg",
+            "precfg",
+        ):
             filt = filtargs.pop(key, None)
             if filt is None:
                 continue
@@ -173,9 +175,6 @@ class ModelCallCache:
         self.latent_format = OCSLatentFormat(
             x.device, model.inner_model.inner_model.latent_format
         )
-        if self.cache.size < 1:
-            return
-        self.reset_cache()
 
     def maybe_filter(
         self, name: str, latent: torch.Tensor, *args: list, **kwargs: dict
@@ -191,11 +190,11 @@ class ModelCallCache:
         if not self.filters:
             return result
         result = result.clone()
-        for key in ("denoised", "cond", "uncond", "jdenoised", "x"):
+        for key in ("denoised", "cond", "uncond", "jdenoised"):
             filt = self.filters.get(key)
             if filt is None:
                 continue
-            attk = f"denoised_{key}" if key in ("cond", "uncond") else key
+            attk = f"denoised_{key}" if key in {"cond", "uncond"} else key
             inpval = getattr(result, attk, None)
             if inpval is None:
                 continue
@@ -207,33 +206,6 @@ class ModelCallCache:
         frmr = filtering.FilterRefs.from_mr(mr)
         fr.kvs |= {f"{k}_curr": v for k, v in frmr.kvs.items()}
         return fr
-
-    def reset_cache(self) -> None:
-        size = self.cache.size
-        self.slot = [None] * size
-        self.slot_use = [self.cache.max_use] * size
-
-    def get(self, idx: int, *, jvp: bool = False) -> None | ModelResult:
-        idx -= self.cache.threshold
-        if (
-            idx >= self.cache.size
-            or idx < 0
-            or self.slot[idx] is None
-            or self.slot_use[idx] < 1
-        ):
-            return None
-        result = self.slot[idx]
-        if jvp and result.jdenoised is None:
-            return None
-        self.slot_use[idx] -= 1
-        return result
-
-    def set(self, idx: int, mr: ModelResult) -> None:
-        idx -= self.cache.threshold
-        if idx < 0 or idx >= self.cache.size:
-            return
-        self.slot_use[idx] = self.cache.max_use
-        self.slot[idx] = mr
 
     def call_model(
         self, x: torch.Tensor, sigma: torch.Tensor, **kwargs: dict
@@ -278,27 +250,49 @@ class ModelCallCache:
             "model_call": call_index,
             "orig_x": x,
         })
-        result = self.get(call_index, jvp=tangents is not None)
-        # print(
-        #     f"MODEL: idx={call_index}, size={self.size}, threshold={self.threshold}, cached={result is not None}"
-        # )
-        if result is not None:
-            self._fr_add_mr(filter_refs, result)
-            result = self.filter_result(result, default_ref=x, refs=filter_refs)
-            return result
 
         comfy.model_management.throw_exception_if_processing_interrupted()
 
         model_options = self.extra_args.get("model_options", {}).copy()
         denoised_cond = denoised_uncond = None
+        have_uncond = True
 
         def postcfg(args):
-            nonlocal denoised_cond, denoised_uncond
+            nonlocal denoised_cond, denoised_uncond, have_uncond
             denoised_uncond = args["uncond_denoised"]
             denoised_cond = args["cond_denoised"]
+            result = args["denoised"]
+            if "postcfg" in self.filters:
+                result = self.maybe_filter(
+                    "postcfg",
+                    result,
+                    refs=filter_refs
+                    | filtering.FilterRefs({
+                        "postcfg_input": args["input"],
+                        "postcfg_sigma": args["sigma"],
+                        "postcfg_denoised_cond": denoised_cond,
+                        "postcfg_denoised_uncond": denoised_uncond,
+                    }),
+                )
             if denoised_uncond is None:
+                have_uncond = False
                 denoised_uncond = denoised_cond
-            return args["denoised"]
+            return result
+
+        def precfg(args):
+            precfg_refs = filter_refs | filtering.FilterRefs({
+                "precfg_input": args["input"],
+                "precfg_sigma": args["sigma"],
+                "precfg_cond_scale": args["cond_scale"],
+            })
+            return [
+                self.maybe_filter(
+                    "precfg",
+                    curr_cond,
+                    refs=precfg_refs | filtering.FilterRefs({"cond_idx": cond_idx}),
+                )
+                for cond_idx, curr_cond in enumerate(args["conds_out"])
+            ]
 
         orig_cfg_scale = self.set_inner_cfg_scale(cfg_scale_override)
 
@@ -308,9 +302,16 @@ class ModelCallCache:
             disable_cfg1_optimization=require_uncond
             or not self.cfg1_uncond_optimization,
         )
+        if "precfg" in self.filters:
+            model_options = comfy.model_patcher.set_model_options_pre_cfg_function(
+                model_options,
+                precfg,
+            )
 
         extra_args = self.extra_args | {"model_options": model_options}
         s_in = fallback(s_in, self.s_in)
+        if s_in.shape[0] != x.shape[0]:
+            s_in = self.s_in = x.new_ones((x.shape[0],))
         x = self.maybe_filter("input", x, refs=filter_refs)
 
         def call_model(x, sigma, **kwargs):
@@ -324,10 +325,10 @@ class ModelCallCache:
                 sigma,
                 x,
                 denoised,
+                have_uncond=have_uncond,
                 denoised_uncond=denoised_uncond,
                 denoised_cond=denoised_cond,
             )
-            self.set(call_index, mr)
             self._fr_add_mr(filter_refs, mr)
             mr = self.filter_result(mr, default_ref=x, refs=filter_refs)
             return mr
@@ -338,11 +339,11 @@ class ModelCallCache:
             sigma,
             x,
             denoised,
+            have_uncond=have_uncond,
             jdenoised=denoised_prime,
             denoised_uncond=denoised_uncond,
             denoised_cond=denoised_cond,
         )
-        self.set(call_index, mr)
         self._fr_add_mr(filter_refs, mr)
         mr = self.filter_result(mr, default_ref=x, refs=filter_refs)
         return mr

@@ -587,6 +587,79 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
         return x
 
 
+class PingpongMergeSubstepsSampler(MergeSubstepsSampler):
+    name = "pingpong"
+
+    def __init__(self, ss, group, **kwargs):
+        super().__init__(ss, group, **kwargs)
+        pingpong = self.options.pop("pingpong", {}).copy()
+        self.pingpong_s_noise = pingpong.pop("s_noise", 1.0)
+        immiscible = pingpong.get("immiscible", False)
+        self.immiscible = (
+            ImmiscibleNoise(**immiscible) if immiscible is not False else False
+        )
+
+        self.custom_noise = self.options.get("custom_noise")
+        if isinstance(self.custom_noise, str):
+            self.custom_noise = self.options.get(f"custom_noise_{self.custom_noise}")
+
+    def step(self, x):
+        orig_x = x.clone()
+        ss = self.ss
+        subss = self.ss.clone_edit(idx=ss.idx, sigmas=ss.sigmas)
+        substep = 0
+        max_idx = len(ss.sigmas) - 1
+        eff_substeps = min(max_idx - ss.idx, self.substeps)
+        pbar = tqdm.tqdm(total=eff_substeps, initial=0, disable=ss.disable_status)
+        for ssampler_ in self.samplers:
+            substeps_remain = eff_substeps - substep
+            if substeps_remain == 0:
+                break
+            with StepSamplerContext(ssampler_, subss) as ssampler:
+                for subidx in range(min(substeps_remain, ssampler.substeps)):
+                    subss.update(ss.idx + substep, substep=substep)
+                    pbar.set_description(
+                        f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
+                    )
+                    subss.hist.push(self.call_model(x, ss=subss))
+                    subss.refs = FilterRefs.from_ss(subss, have_current=True)
+                    if substep == 0:
+                        self.callback(ss=subss)
+                    sr = self.simple_substep(x, ssampler)
+                    x = sr.x
+                    noise_strength = sr.noise_scale
+                    if noise_strength != 0 and subss.sigma_next != 0:
+                        x = sr.noise_x(ss=subss)
+                    substep += 1
+                    pbar.update(1)
+                    if substeps_remain == 1:
+                        break
+        pbar.update(0)
+        if sr.sigma_next == 0:
+            return x
+        sigma, sigma_next = ss.sigma, ss.sigma_next
+        alpha = subss.sigma_next / sigma
+        synth_denoised = (x - alpha * orig_x) / (1 - alpha)
+        noise_sampler = ss.noise.make_caching_noise_sampler(
+            self.custom_noise,
+            1,
+            sigma,
+            sigma_next,
+            immiscible=fallback(self.immiscible, ss.noise.immiscible),
+        )
+        noise_refs = ss.refs | FilterRefs({
+            "orig_x": orig_x,
+            "x": x,
+            "denoised": synth_denoised,
+        })
+        noise = (
+            noise_sampler(sigma, sigma_next, refs=noise_refs) * self.pingpong_s_noise
+        )
+        if ss.model.is_rectified_flow:
+            return torch.lerp(synth_denoised, noise, sigma_next)
+        return synth_denoised + noise * sigma_next
+
+
 class DynamicMergeSubstepsSampler(MergeSubstepsSampler):
     name = "dynamic"
 
@@ -675,5 +748,6 @@ MERGE_SUBSTEPS_CLASSES = {
     "overshoot": OvershootMergeSubstepsSampler,
     "simple": SimpleSubstepsSampler,
     "lookahead": LookaheadMergeSubstepsSampler,
+    "pingpong": PingpongMergeSubstepsSampler,
     "dynamic": DynamicMergeSubstepsSampler,
 }

@@ -44,6 +44,7 @@ def composable_sampler(
             return torch.randn_like(x)
 
     restart_params = copts.get("restart", {})
+    restart_enabled = restart_params.get("enabled", True)
     restart_custom_noise = copts.get("restart_custom_noise")
     if isinstance(restart_custom_noise, str):
         restart_custom_noise = copts.get(f"restart_custom_noise_{restart_custom_noise}")
@@ -83,7 +84,9 @@ def composable_sampler(
         **copts.get("noise", {}),
     )
     ss.noise = nsc
-    sigma_chunks = tuple(restart.split_sigmas(sigmas))
+    sigma_chunks = (
+        tuple(restart.split_sigmas(sigmas)) if restart_enabled else ((0.0, sigmas),)
+    )
     step_count = sum(len(chunk) - 1 for _noise, chunk in sigma_chunks)
     ss.total_steps = step_count
     step = 0
@@ -114,7 +117,6 @@ def composable_sampler(
                 if idx > 0:
                     ss.update(idx, step=step, substep=0)
                     nsc.update_x(x)
-                ss.model.reset_cache()
                 nsc.update_x(x)
                 merge_sampler = find_merge_sampler(merge_samplers, ss)
                 if merge_sampler is None:
