@@ -212,6 +212,8 @@ class BetweenHandler(BaseHandler):  # Inclusive
 
     def handle(self, obj, getter):
         value, low, high = self.safe_get_all(obj, getter)
+        if low > high:
+            low, high = high, low
         return low <= value <= high
 
 

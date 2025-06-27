@@ -136,7 +136,7 @@ class ModelResult:
         return torch.linalg.norm(d_pred.sub_(d)).div_(torch.linalg.norm(d)).item()
 
 
-class ModelCallCache:
+class OCSModel:
     def __init__(
         self,
         model,
@@ -280,18 +280,25 @@ class ModelCallCache:
             return result
 
         def precfg(args):
-            precfg_refs = filter_refs | filtering.FilterRefs({
-                "precfg_input": args["input"],
-                "precfg_sigma": args["sigma"],
-                "precfg_cond_scale": args["cond_scale"],
-            })
+            conds_out = args["conds_out"]
+            precfg_refs = (
+                filter_refs
+                | filtering.FilterRefs({
+                    "precfg_input": args["input"],
+                    "precfg_sigma": args["sigma"],
+                    "precfg_cond_scale": args["cond_scale"],
+                })
+                | filtering.FilterRefs({
+                    f"precfg_cond_{idx}": cond for idx, cond in enumerate(conds_out)
+                })
+            )
             return [
                 self.maybe_filter(
                     "precfg",
                     curr_cond,
                     refs=precfg_refs | filtering.FilterRefs({"cond_idx": cond_idx}),
                 )
-                for cond_idx, curr_cond in enumerate(args["conds_out"])
+                for cond_idx, curr_cond in enumerate(conds_out)
             ]
 
         orig_cfg_scale = self.set_inner_cfg_scale(cfg_scale_override)

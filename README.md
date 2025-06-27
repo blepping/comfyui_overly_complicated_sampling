@@ -98,6 +98,9 @@ reta: 1.0
 
 # Parameters related to restart sampling.
 restart:
+    # When enabled, out of order sigmas will be detected as restart.
+    # You can disable this if you want to use OCS for something like unsampling.
+    enabled: true
     # Scales the noise added by restart sampling.
     s_noise: 1.0
     # Immiscible block same as described below.
@@ -107,7 +110,7 @@ restart:
 
 # The noise block allows defining global noise sampling parameters.
 noise:
-    # You can disable this to allow GPU noise generation. I believe it only makes a difference for Brownian.
+    # You can disable this to allow GPU noise generation.
     cpu_noise: true
 
     # ComfyUI has a bug where if you disable add_noise in the sampler, no seed gets set. If you
@@ -184,6 +187,12 @@ noise:
         # See: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html#scipy.optimize.linear_sum_assignment
         maximize: false
 
+        # Can be set to enable immiscible v2 mode. 0.0 is disabled, 0.1 is a reasonable value.
+        distance_scale: 0.0
+
+        # If null will use the same value as distance_scale.
+        distance_scale_ref: null
+
     filter: null
 
 
@@ -233,6 +242,7 @@ When running multiple substeps per step, the results will combined based on the 
 * `supreme_avg`: The model is called at least once per step (and possibly additional times for higher order samplers). Each substep shares the first model call result. The results are averaged together. *Note*: Since the first model call is shared and the initial input is the same for each substep, there is no point in running multiple identical substeps. Also note: This merge strategy doesn't work well with non-ancestral samplers (i.e. dpmpp_2m or any sampler with `eta: 0`).
 * `overshoot`: The model is called at least once per step. It will sample steps equal to the number of substeps, starting from the current step. Then it will restart back to the expected step.
 * `lookahead`: Similar to `overshoot`, it samples ahead based on the number of substeps. The last model prediction is used to do a Euler step to the expected step. *Note:* Very experimental, likely to change in the future.
+* `pingpong`: Works similar to `overshoot` and `lookahead` methods except it does a pingpong sampler style step to the expected sigma.
 * `dynamic`: Allows specifying the group parameters as an expression to be evaluated. See below.
 
 **Dynamic Groups**: When `merge_method` is set to `dynamic` you must specify a `dynamic` block in the text parameters. The dynamic block may be either a string with the expression or a list of objects with an (optional) `when` key and a (required) `expression` key. The expression should return a dictionary of parameters you can set in the node (including both keys/values from the text parameters and widgets in the node). The first matching item will be used. Example:
@@ -328,6 +338,11 @@ lookahead:
     immiscible:
         size: 0
 
+# Only used by the pingpong merge method.
+pingpong:
+    # Scales the noise added by lookahead sampling.
+    s_noise: 1.0
+
 pre_filter: null
 
 post_filter: null
@@ -360,12 +375,15 @@ In alphabetical order.
 * `dynamic`: Advanced step method that allows using an expression to determine the sampler parameters at each substep. See below for a more detailed explanation.
 * `euler`: If samplers came in vanilla.
 * `extraltodeus_distance`: Adaptive-ish/configurable step variant of Heun. Referenced from [https://github.com/Extraltodeus/DistanceSampler](https://github.com/Extraltodeus/DistanceSampler). See parameters: `distance`.
+* `gradient_estimation`
 * `heun_1s`: Alternate Heun one step implementation. Supports reversible parameters.
 * `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`.
 * `heunpp`: See parameters: `max_order`.
 * `ipndm_v`: See parameters: `history_limit`.
 * `ipndm`: See parameters: `history_limit`.
+* `pingpong`
 * `res`: Refined Exponential Solver. I believe this is a variant of Heun. Generally works very well.
+* `res_multistep`
 * `reversible_bogacki`: Reversible variant of Bockacki-Shampine.
 * `reversible_heun_1s`: Reversible variant of Heun 1 step. See parameters: `history_limit`.
 * `reversible_heun`: Reversible variant of Heun.
@@ -407,7 +425,9 @@ In alphabetical order.
 |`heunpp`|1-3||X|||
 |`ipndm_v`|1|1-3 (1)||||
 |`ipndm`|1|1-3 (1)||||
+|`pingpong`|1|||||
 |`res`|2|||||
+|`res_multistep`|1|1||||
 |`reversible_bogacki`|2|||X||
 |`reversible_heun_1s`|1|1||X||
 |`reversible_heun`|2|||X||

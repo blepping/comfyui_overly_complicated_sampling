@@ -3,7 +3,9 @@ import math
 
 import torch
 
-from ..filtering import BLENDING_MODES
+from comfy import model_management
+
+from .. import filtering
 from ..latent import normalize_to_scale
 from ..noise import scale_noise
 from .base import CustomNoiseItemBase, NormalizeNoiseNodeMixin
@@ -51,13 +53,13 @@ def rand_perlin(
     *,
     tileable=DEFAULTS.tileable,
     fade=DEFAULTS.fade,
-    blend=BLENDING_MODES[DEFAULTS.blend],
+    blend=torch.lerp,
     generator=DEFAULTS.generator,
     device=DEFAULTS.device,
 ):
     dims = len(res)
     didxs = tuple(range(dims))
-    delta, d = zip(*((res[i] / shape[i], int(shape[i] // res[i])) for i in didxs))
+    delta, d = zip(*((res[i] / shape[i], int(round(shape[i] / res[i]))) for i in didxs))
 
     grid = (
         torch.stack(
@@ -164,7 +166,7 @@ def generate_fractal_noise(
     initial_frequency=DEFAULTS.initial_frequency,
     tileable=DEFAULTS.tileable,
     fade=DEFAULTS.fade,
-    blend=BLENDING_MODES[DEFAULTS.blend],
+    blend=torch.lerp,
     generator=DEFAULTS.generator,
     device=DEFAULTS.device,
 ):
@@ -232,8 +234,8 @@ def create_noisy_latents_perlin(
     res=DEFAULTS.res,
     break_pattern=DEFAULTS.break_pattern,
     channels=4,
-    blend=BLENDING_MODES[DEFAULTS.blend],
-    pattern_break_blend=BLENDING_MODES[DEFAULTS.pattern_break_blend],
+    blend=torch.lerp,
+    pattern_break_blend=torch.lerp,
     depth_over_channels=DEFAULTS.depth_over_channels,
     pad=DEFAULTS.pad,
     initial_frequency=DEFAULTS.initial_frequency,
@@ -427,15 +429,20 @@ class PerlinItem(CustomNoiseItemBase):
     ):
         normalized = self.get_normalize("normalized", normalized)
         cpu = cpu if self.device == "default" else self.device == "cpu"
-        device = torch.device(0 if not cpu else "cpu")
+        device = "cpu" if cpu else model_management.get_torch_device()
         noise_chunk = None
         noise_index = self.initial_depth
         max_idx = None
-        b, c, h, w = x.shape
+        if x.ndim < 4:
+            raise ValueError("Can only handle latents with 4+ dimensions")
+        orig_shape = x.shape
+        b = x.shape[0]
+        c = math.prod(x.shape[1:-2])  # Hack to deal with video models.
+        h, w = x.shape[-2:]
         x_device, x_dtype = x.device, x.dtype
         del x
-        blend = BLENDING_MODES[self.blend]
-        pattern_break_blend = BLENDING_MODES[self.pattern_break_blend]
+        blend = filtering.BLENDING_MODES[self.blend]
+        pattern_break_blend = filtering.BLENDING_MODES[self.pattern_break_blend]
 
         def noise_sampler(_s, _sn):
             nonlocal noise_chunk, noise_index, max_idx
@@ -482,6 +489,7 @@ class PerlinItem(CustomNoiseItemBase):
                 noise_index = 0
                 if not self.wrap_depth:
                     noise_chunk = None
-            return scale_noise(noise, self.factor, normalized=normalized)
+            result = scale_noise(noise, self.factor, normalized=normalized)
+            return result.reshape(orig_shape) if result.shape != orig_shape else result
 
         return noise_sampler

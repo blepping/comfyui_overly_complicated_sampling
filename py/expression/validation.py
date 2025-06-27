@@ -1,3 +1,4 @@
+import contextlib
 import functools
 
 from ..latent import ImageBatch
@@ -150,11 +151,19 @@ class ValidateArg:
 
     @classmethod
     def validate_tensor_slice_item(cls, idx, val):
-        if not (val in {Ellipsis, None} or isinstance(val, (int, slice))):
-            raise ValidateError(
-                f"Expected none, int, slice or ellipsis argument at {idx}, got {type(val)}"
+        with contextlib.suppress(ValidateError):
+            ok = (
+                val in {Ellipsis, None}
+                or isinstance(val, (int, slice))
+                or cls.validate_sequence(
+                    idx, val, item_validator=ValidateArg.validate_integer
+                )
             )
-        return val
+            if ok:
+                return val
+        raise ValidateError(
+            f"Expected none, int, slice, tuple of int or ellipsis argument at {idx}, got {type(val)}"
+        )
 
     @classmethod
     def validate_integer(cls, idx, val):

@@ -416,9 +416,16 @@ class HistorySingleStepSampler(SingleStepSampler):
 
     def available_history(self):
         ss = self.ss
-        return max(
+        available = max(
             0, min(ss.idx, self.history_limit, self.max_history, len(ss.hist) - 1)
         )
+        if not available:
+            return available
+        curr_shape = ss.hist[-1].denoised.shape
+        for eff_available in range(available):
+            if ss.hist[-2 - eff_available].denoised.shape != curr_shape:
+                return eff_available
+        return available
 
 
 class ReversibleConfig(typing.NamedTuple):

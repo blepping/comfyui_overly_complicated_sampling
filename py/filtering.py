@@ -26,7 +26,7 @@ def init_integrations(integrations):
     global BLENDING_MODES, FILTER, EXT_BLEH
     EXT_BLEH = integrations.bleh
     if EXT_BLEH is not None:
-        BLENDING_MODES |= EXT_BLEH.latent_utils.BLENDING_MODES
+        BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES | BLENDING_MODES
         FILTER |= {
             "bleh_enhance": BlehEnhanceFilter,
             "bleh_ops": BlehOpsFilter,

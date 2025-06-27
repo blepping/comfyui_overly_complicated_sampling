@@ -51,6 +51,51 @@ def scale_noise(
     return noise.sub_(noise.mean(dim=normalize_dims, keepdim=True)).mul_(factor)
 
 
+def _quantile_norm_scaledown(
+    noise: torch.Tensor,
+    nq: torch.Tensor,
+    **_kwargs: dict,
+) -> torch.Tensor:
+    mv = noise.abs().max().detach().item()
+    return noise if mv == 0 else torch.where(noise.abs() > nq, noise * (nq / mv), noise)
+
+
+quantile_handlers = {
+    "clamp": lambda noise, nq, **_kwargs: noise.clamp(-nq, nq),
+    "scale_down": _quantile_norm_scaledown,
+    "tanh": lambda noise, nq, **_kwargs: noise.tanh().mul_(nq.abs()),
+    "tanh_outliers": lambda noise, nq, **_kwargs: torch.where(
+        noise.abs() > nq,
+        noise.tanh().mul_(nq.abs()),
+        noise,
+    ),
+    "sigmoid": lambda noise, nq, **_kwargs: noise.sigmoid()
+    .mul_(nq.abs())
+    .copysign(noise),
+    "sigmoid_outliers": lambda noise, nq, **_kwargs: torch.where(
+        noise.abs() > nq,
+        noise.sigmoid().mul_(nq.abs()).copysign(noise),
+        noise,
+    ),
+    "tenth": lambda noise, nq, **_kwargs: torch.where(
+        noise.abs() > nq,
+        noise * 0.1,
+        noise,
+    ),
+    "half": lambda noise, nq, **_kwargs: torch.where(
+        noise.abs() > nq,
+        noise * 0.5,
+        noise,
+    ),
+    "zero": lambda noise, nq, **_kwargs: torch.where(noise.abs() > nq, 0, noise),
+    "reverse_zero": lambda noise, nq, **_kwargs: torch.where(
+        noise.abs() >= nq,
+        noise,
+        0,
+    ),
+}
+
+
 # Initial version based on Studentt distribution normalizatino from https://github.com/Clybius/ComfyUI-Extra-Samplers/
 def quantile_normalize(
     noise: torch.Tensor,
@@ -60,6 +105,8 @@ def quantile_normalize(
     flatten: bool = True,
     nq_fac: float = 1.0,
     pow_fac: float = 0.5,
+    strategy: str = "clamp",
+    strategy_handler=None,
 ) -> torch.Tensor:
     if quantile is None or quantile <= 0 or quantile >= 1:
         return noise
@@ -70,17 +117,15 @@ def quantile_normalize(
             device=noise.device,
             dtype=noise.dtype,
         )
-    qdim = dim if dim >= 0 else noise.ndim + dim
-    if qdim < 0:
-        raise ValueError("Negative dimension out of range")
+    qdim = dim
     if noise.ndim > 1 and flatten:
         if qdim is not None and qdim >= noise.ndim:
             qdim = 1 if noise.ndim > 2 else None
         if qdim is None:
             flatdim = 0
-        elif qdim in {0, 1}:
+        elif -1 < qdim < 2:  # 0, 1
             flatdim = qdim + 1
-        elif qdim in {2, 3}:
+        elif 1 < qdim < 4:  # 2, 3
             noise = noise.movedim(qdim, 1)
             tempshape = noise.shape
             flatdim = 2
@@ -97,11 +142,20 @@ def quantile_normalize(
     )
     nq_shape = tuple(nq.shape) + (1,) * (noise.ndim - nq.ndim)
     nq = nq.mul_(nq_fac).reshape(*nq_shape)
-    noise = noise.clamp(-nq, nq)
-    noise = torch.copysign(
-        torch.pow(torch.abs(noise), pow_fac),
-        noise,
+    handler = (
+        quantile_handlers.get(strategy)
+        if strategy_handler is None
+        else strategy_handler
     )
+    if handler is None:
+        raise ValueError("Unknown strategy")
+    noise = handler(
+        noise,
+        nq,
+        dim=dim,
+        flatten=flatten,
+    )
+    noise = noise.abs().pow(pow_fac).copysign(noise)
     if flatdim is not None and qdim in {2, 3}:
         return (
             noise.reshape(tempshape).movedim(1, qdim).reshape(orig_shape).contiguous()

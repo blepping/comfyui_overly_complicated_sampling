@@ -39,31 +39,32 @@ def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
     )
 
 
+# Improvements by https://github.com/Clybius
 # The following is modified to work with latent images of ~0 mean from https://github.com/Jamy-L/Pytorch-Contrast-Adaptive-Sharpening/tree/main.
-def contrast_adaptive_sharpening(x, amount=0.8, *, epsilon=1e-06):
-    """
-    Performs a contrast adaptive sharpening on the batch of images x.
-    The algorithm is directly implemented from FidelityFX's source code,
-    that can be found here
-    https://github.com/GPUOpen-Effects/FidelityFX-CAS/blob/master/ffx-cas/ffx_cas.h
+# The algorithm is directly implemented from FidelityFX's source code that can be found here: https://github.com/GPUOpen-Effects/FidelityFX-CAS/blob/master/ffx-cas/ffx_cas.h.
+def contrast_adaptive_sharpening(  # noqa: PLR0914
+    x,
+    amount=0.8,
+    *,
+    normalize=True,
+    epsilon=1e-06,
+):
+    orig_shape = x.shape
+    if x.ndim == 5:
+        x = x.reshape(orig_shape[0], orig_shape[1] * orig_shape[2], *orig_shape[-2:])
+    elif x.ndim != 4:
+        raise ValueError(
+            "Contrast-adaptive sharpening requires a tensor with 4 or 5 dimensions",
+        )
 
-    Parameters
-    ----------
-    x : Tensor
-        Image or stack of images, of shape [batch, channels, ny, nx].
-        Batch and channel dimensions can be ommited.
-    amount : int [0, 1]
-        Amount of sharpening to do, 0 being minimum and 1 maximum
-
-    Returns
-    -------
-    Tensor
-        Processed stack of images.
-
-    """
-
-    def on_abs_stacked(tensor_list, f, *args, **kwargs):
+    def on_abs_stacked(tensor_list, f, *args: list, **kwargs: dict):
         return f(torch.abs(torch.stack(tensor_list)), *args, **kwargs)[0]
+
+    if normalize:
+        luminance = torch.linalg.vector_norm(x, dim=1, keepdim=True).add_(1e-08)
+        x = x / luminance
+        orig_mean = x.mean(dim=(-3, -2, -1), keepdim=True)
+        x -= orig_mean
 
     x_padded = F.pad(x, pad=(1, 1, 1, 1))
     x_padded = torch.complex(x_padded, torch.zeros_like(x_padded))
@@ -116,7 +117,12 @@ def contrast_adaptive_sharpening(x, amount=0.8, *, epsilon=1e-06):
     div = torch.reciprocal(1 + 4 * w)
     output = ((b + d + f + h) * w + e) * div
 
-    return output.real.clamp(x.min(), x.max())
+    output = output.real
+    for ob, xb in zip(x, output):
+        ob.clamp_(*xb.aminmax())
+    if normalize:
+        output = output.add_(orig_mean).mul_(luminance)
+    return output.reshape(*orig_shape)
 
 
 class ImageBatch(tuple):
@@ -159,24 +165,11 @@ class OCSTAESD:
     @classmethod
     def decode(cls, fmt, latent):
         latent_format = cls.latent_formats[fmt]
-        # rv = latent_format.process_out(1.0)
         filename = cls.get_taesd_path(cls.get_decoder_name(fmt))
         model = TAESD(
             decoder_path=filename, latent_channels=latent_format.latent_channels
         ).to(latent.device)
-        # print("DEC INPUT ORIG", latent.min(), latent.max())
-        # if torch.any(latent.max() > rv) or torch.any(latent.min() < -rv):
-        #     sv = latent.new((-rv, rv))
-        #     latent = normalize_to_scale(
-        #         latent,
-        #         latent.amin(dim=(-3, -2, -1), keepdim=True).maximum(sv[0]),
-        #         latent.amax(dim=(-3, -2, -1), keepdim=True).minimum(sv[1]),
-        #         dim=(-3, -2, -1),
-        #     )
-        # print("DEC INPUT", latent.min(), latent.max())
-        # result = model.decode(latent.clamp(-rv, rv)).movedim(1, 3)
         result = model.decode(latent).movedim(1, 3)
-        # print("DEC RESULT", result.shape, result.isnan().any().item())
         return ImageBatch(
             latent_preview.preview_to_image(result[batch_idx])
             for batch_idx in range(result.shape[0])
@@ -204,45 +197,33 @@ class OCSTAESD:
             encoder_path=filename, latent_channels=latent_format.latent_channels
         ).to(device=latent.device)
         result = model.encode(cls.img_to_encoder_input(imgbatch).to(latent.device))
-        # print(
-        #     "ENC RESULT ORIG",
-        #     result.min(),
-        #     result.max(),
-        # )
-        # if torch.any(result.max() > rv) or torch.any(result.min() < -rv):
-        #     sv = result.new((-rv, rv))
-        #     result = normalize_to_scale(
-        #         result,
-        #         result.amin(dim=(-3, -2, -1), keepdim=True).maximum(sv[0]),
-        #         result.amax(dim=(-3, -2, -1), keepdim=True).minimum(sv[1]),
-        #         dim=(-3, -2, -1),
-        #     )
-        # print(
-        #     "ENC RESULT",
-        #     result.shape,
-        #     result.isnan().any().item(),
-        #     result.min(),
-        #     result.max(),
-        # )
         return result.to(latent.dtype).clamp(-rv, rv)
 
 
-if "bleh" in EXT:
-    scale_samples = EXT["bleh"].latent_utils.scale_samples
-    UPSCALE_METHODS = EXT["bleh"].latent_utils.UPSCALE_METHODS
-else:
-    UPSCALE_METHODS = ("bicubic", "bislerp", "bilinear", "nearest-exact", "area")
+bleh_scale_samples = None
+UPSCALE_METHODS = ("bicubic", "bislerp", "bilinear", "nearest-exact", "area")
 
-    def scale_samples(
-        samples,
-        width,
-        height,
-        mode="bicubic",
-        sigma=None,  # noqa: ARG001
-    ):
-        if mode == "bislerp":
-            return bislerp(samples, width, height)
-        return F.interpolate(samples, size=(height, width), mode=mode)
+
+def scale_samples(
+    samples,
+    width,
+    height,
+    mode="bicubic",
+    sigma=None,  # noqa: ARG001
+):
+    global bleh_scale_samples, UPSCALE_METHODS
+    if bleh_scale_samples is None:
+        bleh = EXT.get("bleh")
+        if bleh is not None:
+            bleh_scale_samples = bleh.latent_utils.scale_samples
+            UPSCALE_METHODS = bleh.latent_utils.UPSCALE_METHODS
+        else:
+            bleh_scale_samples = False
+    if bleh_scale_samples:
+        return bleh_scale_samples(samples, width, height, mode=mode, sigma=sigma)
+    if mode == "bislerp":
+        return bislerp(samples, width, height)
+    return F.interpolate(samples, size=(height, width), mode=mode)
 
 
 def get_noise_sampler(noise_type, x, *_args: list, **_kwargs: dict):  # noqa: F811

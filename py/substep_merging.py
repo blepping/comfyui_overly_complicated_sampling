@@ -61,17 +61,23 @@ class MergeSubstepsSampler:
         return operator.truth(self.when.eval(handlers))
 
     def step_input(self, x, *, ss=None):
+        ss = fallback(ss, self.ss)
+        ss.noise.update_x(x)
         if self.pre_filter is None:
             return x
-        ss = fallback(ss, self.ss)
-        return self.pre_filter.apply(x, refs=fallback(ss, self.ss).refs)
+        x = self.pre_filter.apply(x, refs=fallback(ss, self.ss).refs)
+        ss.noise.update_x(x)
+        return x
 
     def step_output(self, x, *, orig_x=None, ss=None):
+        ss = fallback(ss, self.ss)
+        ss.noise.update_x(x)
         if self.post_filter is None:
             return x
-        ss = fallback(ss, self.ss)
         refs = ss.refs if orig_x is None else ss.refs | FilterRefs({"orig_x": orig_x})
-        return self.post_filter.apply(x, refs=refs)
+        x = self.post_filter.apply(x, refs=refs)
+        ss.noise.update_x(x)
+        return x
 
     def __call__(self, x):
         orig_x = x

@@ -3,7 +3,7 @@ from tqdm.auto import trange
 
 
 from .filtering import FILTER_HANDLERS, FilterRefs
-from .model import ModelCallCache
+from .model import OCSModel
 from .noise import NoiseSamplerCache
 from .substep_sampling import SamplerState
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
@@ -55,7 +55,7 @@ def composable_sampler(
     )
 
     ss = SamplerState(
-        ModelCallCache(
+        OCSModel(
             model,
             x,
             x.new_ones((x.shape[0],)),

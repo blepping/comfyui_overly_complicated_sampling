@@ -31,7 +31,7 @@ def init_integrations(integrations):
     EXT_BLEH = integrations.bleh
     EXT_SONAR = integrations.sonar
     if EXT_BLEH is not None:
-        BLENDING_MODES |= EXT_BLEH.latent_utils.BLENDING_MODES
+        BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES
         HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
     if EXT_SONAR is not None:
         HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
@@ -64,11 +64,12 @@ class QuantileNormHandler(NormHandler):
         expr.Arg.boolean("flatten", True),
         expr.Arg.numeric("norm_factor", 1.0),
         expr.Arg.numeric("norm_power", 0.5),
+        expr.Arg.string("mode", "clamp"),
     )
 
     def handle(self, obj, getter):
-        tensor, quantile, dim, flatten, norm_factor, norm_power = self.safe_get_all(
-            obj, getter
+        tensor, quantile, dim, flatten, norm_factor, norm_power, mode = (
+            self.safe_get_all(obj, getter)
         )
         return quantile_normalize(
             tensor,
@@ -77,6 +78,7 @@ class QuantileNormHandler(NormHandler):
             flatten=flatten,
             nq_fac=norm_factor,
             pow_fac=norm_power,
+            strategy=mode,
         )
 
 
@@ -293,11 +295,12 @@ class ContrastAdaptiveSharpeningHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numeric("scale", 0.5),
+        expr.Arg.boolean("normalize", True),
     )
 
     def handle(self, obj, getter):
-        t, scale = self.safe_get_all(obj, getter)
-        return latent.contrast_adaptive_sharpening(t, scale)
+        t, scale, normalize = self.safe_get_all(obj, getter)
+        return latent.contrast_adaptive_sharpening(t, scale, normalize=normalize)
 
 
 class ScaleHandler(NormHandler):

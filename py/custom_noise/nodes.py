@@ -1,3 +1,4 @@
+import functools
 import inspect
 import math
 import torch
@@ -13,7 +14,7 @@ from .noise_perlin import PerlinItem
 from .noise_immiscibleref import ImmiscibleReferenceItem
 
 from ..external import MODULES, IntegratedNode
-from ..filtering import BLENDING_MODES
+from .. import filtering
 from ..nodes import WILDCARD_NOISE, NOISE_INPUT_TYPES_HINT
 from ..utils import scale_noise
 from ..noise import ImmiscibleNoise
@@ -176,14 +177,14 @@ class PerlinAdvancedNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
                 },
             ),
             "blend": (
-                tuple(BLENDING_MODES.keys()),
+                tuple(filtering.BLENDING_MODES.keys()),
                 {
                     "default": "lerp",
                     "tooltip": "Blending function used when generating Perlin noise. When set to values other than LERP may not work at all or may not actually generate Perlin noise.",
                 },
             ),
             "pattern_break_blend": (
-                tuple(BLENDING_MODES.keys()),
+                tuple(filtering.BLENDING_MODES.keys()),
                 {
                     "default": "lerp",
                     "tooltip": "Blending function used to blend pattern broken noise with raw noise.",
@@ -399,7 +400,7 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                 },
             ),
             "blend_mode": (
-                tuple(BLENDING_MODES.keys()),
+                tuple(filtering.BLENDING_MODES.keys()),
                 {
                     "default": "lerp",
                     "tooltip": "Blending function used when mixing immiscible noise with normal noise. Only slerp seems to work well (requires ComfyUI-bleh).",
@@ -452,7 +453,7 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
             distance_scale=distance_scale,
             distance_scale_ref=distance_scale_ref,
             blend=blend,
-            blend_function=BLENDING_MODES[blend_mode],
+            blend_function=filtering.BLENDING_MODES[blend_mode],
             normalize=self.get_normalize(normalize),
             noise=custom_noise,
             reference=reference["samples"].clone(),
@@ -499,14 +500,14 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
                     },
                 ),
                 "blend_mode": (
-                    tuple(BLENDING_MODES.keys()),
+                    tuple(filtering.BLENDING_MODES.keys()),
                     {
                         "default": "inject",
                         "tooltip": "Blending function used when combining noise with the conditioning. inject just adds it.",
                     },
                 ),
                 "pooled_blend_mode": (
-                    tuple(BLENDING_MODES.keys()),
+                    tuple(filtering.BLENDING_MODES.keys()),
                     {
                         "default": "inject",
                         "tooltip": "Blending function used when combining noise with the pooled conditioning. inject just adds it.",
@@ -712,8 +713,8 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
         custom_noise=None,
     ):
         MODULES.initialize()
-        blend_function = BLENDING_MODES[blend_mode]
-        pblend_function = BLENDING_MODES[pooled_blend_mode]
+        blend_function = filtering.BLENDING_MODES[blend_mode]
+        pblend_function = filtering.BLENDING_MODES[pooled_blend_mode]
         noise_spatdim_min = 4 * fake_channels
         size = psize = 0
         count = pcount = 0
@@ -948,7 +949,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     },
                 ),
                 "immiscible_blend_mode": (
-                    tuple(BLENDING_MODES.keys()),
+                    tuple(filtering.BLENDING_MODES.keys()),
                     {
                         "default": "lerp",
                         "tooltip": "Blending function used when mixing immiscible noise with normal noise. Only slerp seems to work well (requires ComfyUI-bleh).",
@@ -1060,43 +1061,44 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 )
             else:
                 sampler_kwargs |= extra_params
+        sampler_function = functools.partial(
+            self.sampler_function,
+            ocs_override_sampler_cfg={
+                "sampler": sampler,
+                "immiscible": {
+                    "size": immiscible_size,
+                    "batching": immiscible_batching,
+                    "reference": immiscible_reference,
+                    "norm_ref_scale": immiscible_normalize_ref_scale,
+                    "norm_noise_scale": immiscible_normalize_noise_scale,
+                    "maximize": immiscible_maximize,
+                    "distance_scale": immiscible_distance_scale,
+                    "distance_scale_ref": immiscible_distance_scale_ref,
+                    "start_time": immiscible_start_time,
+                    "end_time": immiscible_end_time,
+                    "blend": immiscible_blend,
+                    "blend_mode": immiscible_blend_mode,
+                },
+                "noise_start_time": noise_start_time,
+                "noise_end_time": noise_end_time,
+                "custom_noise": custom_noise_opt,
+                "sampler_kwargs": sampler_kwargs,
+                "cpu_noise": cpu_noise,
+                "normalize": normalize,
+            },
+        )
+        functools.update_wrapper(sampler_function, sampler.sampler_function)
         return (
             comfy.samplers.KSAMPLER(
-                self.sampler_function,
-                extra_options=sampler.extra_options
-                | {
-                    "ocs_override_sampler_cfg": {
-                        "sampler": sampler,
-                        "immiscible": {
-                            "size": immiscible_size,
-                            "batching": immiscible_batching,
-                            "reference": immiscible_reference,
-                            "norm_ref_scale": immiscible_normalize_ref_scale,
-                            "norm_noise_scale": immiscible_normalize_noise_scale,
-                            "maximize": immiscible_maximize,
-                            "distance_scale": immiscible_distance_scale,
-                            "distance_scale_ref": immiscible_distance_scale_ref,
-                            "start_time": immiscible_start_time,
-                            "end_time": immiscible_end_time,
-                            "blend": immiscible_blend,
-                            "blend_mode": immiscible_blend_mode,
-                        },
-                        "noise_start_time": noise_start_time,
-                        "noise_end_time": noise_end_time,
-                        "custom_noise": custom_noise_opt,
-                        "sampler_kwargs": sampler_kwargs,
-                        "cpu_noise": cpu_noise,
-                        "normalize": normalize,
-                    },
-                },
+                sampler_function,
+                extra_options=sampler.extra_options.copy(),
                 inpaint_options=sampler.inpaint_options.copy(),
             ),
         )
 
-    @classmethod
+    @staticmethod
     @torch.no_grad()
     def sampler_function(
-        cls,
         model,
         x,
         sigmas,
@@ -1211,7 +1213,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     distance_scale=idistance_scale,
                     distance_scale_ref=idistance_scale_ref,
                 )
-                blend_function = BLENDING_MODES[iblend_mode]
+                blend_function = filtering.BLENDING_MODES[iblend_mode]
 
                 ref_latent = None
                 ref_handlers = {
