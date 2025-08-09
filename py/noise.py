@@ -4,6 +4,7 @@ import random
 
 import scipy
 import torch
+from tqdm import tqdm
 
 from .filtering import Filter, make_filter
 from .utils import scale_noise, fallback
@@ -69,37 +70,68 @@ class ImmiscibleNoise(Filter):
             return latent.reshape(sz[0], sz[2], sz[1], *sz[3:]).permute(0, 2, 1, 3, 4)
         return latent.reshape(*sz)
 
-    # Based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395
+    # Originally based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395
     # Idea for use with inference as well as implementation help from https://github.com/Clybius
-    def immiscible(self, latent, ref_latent):
+    def immiscible(
+        self,
+        latent: torch.Tensor,
+        ref_latent: torch.Tensor,
+        *,
+        out_latent: torch.Tensor | None = None,
+        return_idxs=False,
+    ):
         # "Immiscible Diffusion: Accelerating Diffusion Training with Noise Assignment" (2024) Li et al. arxiv.org/abs/2406.12303
         # Minimize latent-noise pairs over a batch
-        n = latent.shape[0]
+        batch = latent.shape[0]
         ref_latent = ref_latent.detach().clone()
         if self.distance_scale == 0:
-            ref_latent_expanded = (
-                ref_latent.half().unsqueeze(1).expand(-1, n, *ref_latent.shape[1:])
+            ref_latent_expanded = ref_latent.unsqueeze(1).expand(
+                -1, batch, *ref_latent.shape[1:]
             )
-            latent_expanded = (
-                latent.half().unsqueeze(0).expand(ref_latent.shape[0], *latent.shape)
+            latent_expanded = latent.unsqueeze(0).expand(
+                ref_latent.shape[0], *latent.shape
             )
             dist = (ref_latent_expanded - latent_expanded) ** 2
             del ref_latent_expanded, latent_expanded
-            dist = dist.mean(list(range(2, dist.dim())))
+            dist = dist.mean(tuple(range(2, dist.dim())))
         else:
             dist = torch.linalg.vector_norm(
                 fallback(self.distance_scale_ref, self.distance_scale)
-                * ref_latent.half().flatten(start_dim=1).unsqueeze(1)
-                - self.distance_scale * latent.half().flatten(start_dim=1).unsqueeze(0),
+                * ref_latent.flatten(start_dim=1).unsqueeze(1)
+                - self.distance_scale * latent.flatten(start_dim=1).unsqueeze(0),
                 dim=2,
             )
+        dist = dist.half()
         try:
             assign_mat = scipy.optimize.linear_sum_assignment(
                 dist.cpu(), maximize=self.maximize
             )
-        except ValueError:
-            return latent[: ref_latent.shape[0]]
-        return latent[assign_mat[1]]
+        except ValueError as exc:
+            tqdm.write(f"OCS: Immiscible: Failed due to exception: {exc}")
+            return (
+                None
+                if return_idxs
+                else fallback(out_latent, latent)[: ref_latent.shape[0]]
+            )
+        return (
+            assign_mat if return_idxs else fallback(out_latent, latent)[assign_mat[1]]
+        )
+
+    def immiscible_simple(
+        self,
+        latent: torch.Tensor,
+        ref_latent: torch.Tensor,
+        *,
+        out_latent: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.unbatch(
+            self.immiscible(
+                self.batch(latent),
+                self.batch(ref_latent),
+                out_latent=self.batch(out_latent) if out_latent is not None else None,
+            ),
+            ref_latent.shape,
+        )
 
 
 class NoiseSamplerCache:

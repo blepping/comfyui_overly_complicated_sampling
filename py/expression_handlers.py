@@ -630,6 +630,7 @@ TENSOR_OP_HANDLERS = {
     "t_norm": NormHandler(),
     "t_quantilenorm": QuantileNormHandler(),
     "t_normtoscale": NormToScaleHandler(),
+    "t_normalize_to_scale": NormToScaleHandler(),
     "t_reshape": ReshapeHandler(),
     "t_clamp": ClampHandler(),
     "t_cat": CatHandler(),

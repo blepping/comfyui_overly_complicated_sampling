@@ -4,11 +4,13 @@ import math
 import torch
 import yaml
 
+from typing import NamedTuple
+
 from comfy.model_management import get_torch_device
 from comfy.model_patcher import set_model_options_post_cfg_function
 import comfy.samplers
 
-from .base import CustomNoiseNodeBase, NormalizeNoiseNodeMixin
+from .base import CustomNoiseNodeBase, NormalizeNoiseNodeMixin, CustomNoiseItemBase
 from .noise_perlin import DEFAULTS as PERLIN_DEFAULTS
 from .noise_perlin import PerlinItem
 from .noise_immiscibleref import ImmiscibleReferenceItem
@@ -341,6 +343,9 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                     "row",
                     "column",
                     "frame",
+                    "row_plus_column",
+                    "channel_plus_row",
+                    "channel_plus_column",
                 ),
                 {
                     "default": "channel",
@@ -418,7 +423,26 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
                     "tooltip": "Input for custom noise used during ancestral or SDE sampling.",
                 },
             ),
-            "reference": ("LATENT",),
+        }
+        result["optional"] = {
+            "reference": (
+                "LATENT",
+                {
+                    "tooltip": "Attach either this or the custom_noise_ref input but not both.",
+                },
+            ),
+            "custom_noise_ref": (
+                WILDCARD_NOISE,
+                {
+                    "tooltip": "Optional input that can be attached instead of the reference latent. When used, noise from this generator will be used as the reference.",
+                },
+            ),
+            "custom_noise_blend": (
+                WILDCARD_NOISE,
+                {
+                    "tooltip": "Optional input for blended noise (only used when blend is not 1.0). Can be used if you want to blend with a different noise type.",
+                },
+            ),
         }
         return result
 
@@ -441,7 +465,9 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
         blend_mode: str,
         normalize: bool | None,
         custom_noise: object,
-        reference: dict,
+        reference: dict | None = None,
+        custom_noise_ref: object | None = None,
+        custom_noise_blend: object | None = None,
     ) -> tuple:
         return super().go(
             factor,
@@ -455,8 +481,14 @@ class ImmiscibleReferenceNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin)
             blend=blend,
             blend_function=filtering.BLENDING_MODES[blend_mode],
             normalize=self.get_normalize(normalize),
-            noise=custom_noise,
-            reference=reference["samples"].clone(),
+            noise=custom_noise.clone(),
+            reference=reference["samples"].clone() if reference is not None else None,
+            custom_noise_ref=custom_noise_ref.clone()
+            if custom_noise_ref is not None
+            else None,
+            custom_noise_blend=custom_noise_blend.clone()
+            if custom_noise_blend is not None
+            else None,
         )
 
 
@@ -840,6 +872,42 @@ class NoiseConditioningNode(metaclass=IntegratedNode):
         return (result,)
 
 
+class ImmiscibleConfig(NamedTuple):
+    size: int = 64
+    batching: str = "channel"
+    reference: str = "cond"
+    norm_ref_scale: float = 0.0
+    norm_noise_scale: float = 0.0
+    maximize: bool = False
+    distance_scale: float = 0.1
+    distance_scale_ref: float = 0.1
+    start_time: float = 0.0
+    end_time: float = 1.0
+    blend: float = 1.0
+    blend_mode: str = "lerp"
+
+
+DEFAULT_IMMISCIBLE_CONFIG = ImmiscibleConfig()
+
+
+class OverrideSamplerConfig(NamedTuple):
+    sampler: object | None = None
+    sampler_kwargs: dict | None = None
+    noise_start_time: float = 0.0
+    noise_end_time: float = 1.0
+    cpu_noise: bool = True
+    normalize: bool = True
+    force_params: list | tuple = ()
+    custom_noise: object | None = None
+    custom_noise_ref: object | None = None
+    custom_noise_blend: object | None = None
+    latent_ref: torch.Tensor | None = None
+    immiscible: ImmiscibleConfig = DEFAULT_IMMISCIBLE_CONFIG
+
+
+DEFAULT_OVERRIDESAMPLER_CONFIG = OverrideSamplerConfig()
+
+
 class SamplerNodeConfigOverride(metaclass=IntegratedNode):
     DESCRIPTION = "Allows overriding parameters of a SAMPLER, and specifically lets you use custom and/or Immiscible noise. For use with non-OCS samplers, not recommended to use with the OCS Sampler node as it has internal support for Immiscible noise."
 
@@ -850,6 +918,8 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
 
     @classmethod
     def INPUT_TYPES(cls):
+        DICFG = DEFAULT_IMMISCIBLE_CONFIG
+        DOCFG = DEFAULT_OVERRIDESAMPLER_CONFIG
         return {
             "required": {
                 "sampler": (
@@ -861,7 +931,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_size": (
                     "INT",
                     {
-                        "default": 64,
+                        "default": DICFG.size,
                         "min": 0,
                         "tooltip": "Number of batch repeats to use when generating Immiscible noise. Setting this to 0 disables immiscible noise. If the batching type is batch, then Immiscible noise is also disabled unless the size is 2 or higher. Note that this size is in batch repeats regardless of the batching mode. For example, if you are generating a batch of 2 and you set this to 2, then you will generate noise with batch size 4.",
                     },
@@ -879,7 +949,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                         "cycle_channel_column",
                     ),
                     {
-                        "default": "channel",
+                        "default": DICFG.batching,
                         "tooltip": "Dimension to maximize (or minimize) the noise with. Column mode requires reshaping the input and may require a lot of VRAM. Row mode is also fairly slow, but not as bad as column mode. Row and column modes have a very strong effect.",
                     },
                 ),
@@ -890,16 +960,20 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                         "denoised",
                         "model_input",
                         "noise_prediction",
+                        "uncond_sub_cond",
+                        "cond_sub_uncond",
+                        "latent",
+                        "noise",
                     ),
                     {
-                        "default": "cond",
+                        "default": DICFG.reference,
                         "tooltip": "Reference type to use when generating immiscible noise.\ncond - positive prompt.\nuncond - negative prompt.\ndenoised - the model's prediction of a clean image (using both cond and uncond).\nmodel_input - noisy latent image the model was called with (often referred to as x).\nnoise_prediction - model_input with denoised subtracted (leaving just what the model thinks is noise).",
                     },
                 ),
                 "immiscible_normalize_ref_scale": (
                     "FLOAT",
                     {
-                        "default": 0.0,
+                        "default": DICFG.norm_ref_scale,
                         "min": -10000.0,
                         "max": 10000.0,
                         "tooltip": "Controls whether the reference gets normalized. If set to 0, no normalization is done.",
@@ -908,7 +982,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_normalize_noise_scale": (
                     "FLOAT",
                     {
-                        "default": 0.0,
+                        "default": DICFG.norm_noise_scale,
                         "min": -10000.0,
                         "max": 10000.0,
                         "tooltip": "Controls whether the noise used as an input for immiscible noise is gets normalized first. If set to 0, no normalization is done.",
@@ -917,14 +991,14 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_maximize": (
                     "BOOLEAN",
                     {
-                        "default": False,
+                        "default": DICFG.maximize,
                         "tooltip": "When enabled, maximizes the distance between the noise and the reference rather than trying to minimize it.",
                     },
                 ),
                 "immiscible_distance_scale": (
                     "FLOAT",
                     {
-                        "default": 0.1,
+                        "default": DICFG.distance_scale,
                         "min": -10000.0,
                         "max": 10000.0,
                         "tooltip": "Multiplier on the input noise for v2 Immiscible noise. Set to 0 to use v1 Immiscible noise.",
@@ -933,7 +1007,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_distance_scale_ref": (
                     "FLOAT",
                     {
-                        "default": 0.1,
+                        "default": DICFG.distance_scale_ref,
                         "min": -10000.0,
                         "max": 10000.0,
                         "tooltip": "Multiplier on the refence for v2 Immiscible noise. No effect if immiscible_distance_scale is 0.",
@@ -942,7 +1016,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_blend": (
                     "FLOAT",
                     {
-                        "default": 1.0,
+                        "default": DICFG.blend,
                         "min": -10000.0,
                         "max": 10000.0,
                         "tooltip": "Percentage of immiscible noise to use. 1.0 means 100%. May not work very well with most blend modes.",
@@ -951,14 +1025,14 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_blend_mode": (
                     tuple(filtering.BLENDING_MODES.keys()),
                     {
-                        "default": "lerp",
+                        "default": DICFG.blend_mode,
                         "tooltip": "Blending function used when mixing immiscible noise with normal noise. Only slerp seems to work well (requires ComfyUI-bleh).",
                     },
                 ),
                 "immiscible_start_time": (
                     "FLOAT",
                     {
-                        "default": 0.0,
+                        "default": DICFG.start_time,
                         "min": 0.0,
                         "max": 1.0,
                         "tooltip": "Start time as a percentage of sampling where immiscible noise will be used.",
@@ -967,7 +1041,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "immiscible_end_time": (
                     "FLOAT",
                     {
-                        "default": 1.0,
+                        "default": DICFG.end_time,
                         "min": 0.0,
                         "max": 1.0,
                         "tooltip": "End time as a percentage of sampling where immiscible noise will be used.",
@@ -976,7 +1050,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "noise_start_time": (
                     "FLOAT",
                     {
-                        "default": 0.0,
+                        "default": DOCFG.noise_start_time,
                         "min": 0.0,
                         "max": 1.0,
                         "tooltip": "Start time as a percentage of sampling where custom noise will be used.",
@@ -985,7 +1059,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "noise_end_time": (
                     "FLOAT",
                     {
-                        "default": 1.0,
+                        "default": DOCFG.noise_end_time,
                         "min": 0.0,
                         "max": 1.0,
                         "tooltip": "End time as a percentage of sampling where custom noise will be used.",
@@ -994,14 +1068,14 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 "cpu_noise": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": DOCFG.cpu_noise,
                         "tooltip": "Controls whether noise is generated on CPU or GPU. Only affects custom noise.",
                     },
                 ),
                 "normalize": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": DOCFG.normalize,
                         "tooltip": "Controls whether generated noise is normalized to 1.0 strength. This normalization occurs last.",
                     },
                 ),
@@ -1021,6 +1095,24 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                         "dynamicPrompts": False,
                         "multiline": True,
                         "defaultInput": True,
+                    },
+                ),
+                "custom_noise_ref": (
+                    WILDCARD_NOISE,
+                    {
+                        "tooltip": "Required when reference mode is reference_noise, otherwise unused.",
+                    },
+                ),
+                "latent_ref": (
+                    "LATENT",
+                    {
+                        "tooltip": "Required when the reference mode is reference_latent, otherwise unused. This doesn't respect stuff like latent from batch that may have been previously applied and must match the shape of the latent being generated.",
+                    },
+                ),
+                "custom_noise_blend": (
+                    WILDCARD_NOISE,
+                    {
+                        "tooltip": "Optional input for blended noise (only used when blend is not 1.0). Can be used if you want to blend with a different noise type.",
                     },
                 ),
             },
@@ -1045,12 +1137,35 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
         noise_start_time,
         noise_end_time,
         cpu_noise=True,
-        custom_noise_opt=None,
         normalize=True,
         yaml_parameters="",
+        custom_noise_opt=None,
+        custom_noise_ref=None,
+        custom_noise_blend=None,
+        latent_reference: dict | None = None,
     ):
         MODULES.initialize()
         sampler_kwargs = {}
+        overridecfg_kwargs = {
+            "noise_start_time": noise_start_time,
+            "noise_end_time": noise_end_time,
+            "cpu_noise": cpu_noise,
+            "normalize": normalize,
+        }
+        immisciblecfg_kwargs = {
+            "size": immiscible_size,
+            "batching": immiscible_batching,
+            "reference": immiscible_reference,
+            "norm_ref_scale": immiscible_normalize_ref_scale,
+            "norm_noise_scale": immiscible_normalize_noise_scale,
+            "maximize": immiscible_maximize,
+            "distance_scale": immiscible_distance_scale,
+            "distance_scale_ref": immiscible_distance_scale_ref,
+            "start_time": immiscible_start_time,
+            "end_time": immiscible_end_time,
+            "blend": immiscible_blend,
+            "blend_mode": immiscible_blend_mode,
+        }
         if yaml_parameters:
             extra_params = yaml.safe_load(yaml_parameters)
             if extra_params is None:
@@ -1060,32 +1175,41 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     "SamplerConfigOverride: yaml_parameters must either be null or an object",
                 )
             else:
+                ocs_extra = extra_params.pop("ocs", {})
+                override_extra = ocs_extra.pop("override", {})
+                immiscible_extra = override_extra.pop("immiscible", {})
+                overridecfg_kwargs |= override_extra
+                immisciblecfg_kwargs |= immiscible_extra
                 sampler_kwargs |= extra_params
+        if immiscible_reference == "latent":
+            if latent_reference is None:
+                raise ValueError(
+                    "latent_ref input must be connected when reference mode is latent"
+                )
+            overridecfg_kwargs["latent_ref"] = latent_reference["samples"].to(
+                dtype=torch.float32, device="cpu", copy=True
+            )
+        elif immiscible_reference == "noise":
+            if custom_noise_ref is None:
+                raise ValueError(
+                    "custom_noise_ref input must be connected when reference mode is noise"
+                )
+            overridecfg_kwargs["custom_noise_ref"] = custom_noise_ref.clone()
+
         sampler_function = functools.partial(
             self.sampler_function,
-            ocs_override_sampler_cfg={
-                "sampler": sampler,
-                "immiscible": {
-                    "size": immiscible_size,
-                    "batching": immiscible_batching,
-                    "reference": immiscible_reference,
-                    "norm_ref_scale": immiscible_normalize_ref_scale,
-                    "norm_noise_scale": immiscible_normalize_noise_scale,
-                    "maximize": immiscible_maximize,
-                    "distance_scale": immiscible_distance_scale,
-                    "distance_scale_ref": immiscible_distance_scale_ref,
-                    "start_time": immiscible_start_time,
-                    "end_time": immiscible_end_time,
-                    "blend": immiscible_blend,
-                    "blend_mode": immiscible_blend_mode,
-                },
-                "noise_start_time": noise_start_time,
-                "noise_end_time": noise_end_time,
-                "custom_noise": custom_noise_opt,
-                "sampler_kwargs": sampler_kwargs,
-                "cpu_noise": cpu_noise,
-                "normalize": normalize,
-            },
+            ocs_override_sampler_cfg=OverrideSamplerConfig(
+                sampler=sampler,
+                sampler_kwargs=sampler_kwargs,
+                immiscible=ImmiscibleConfig(**immisciblecfg_kwargs),
+                custom_noise=custom_noise_opt.clone()
+                if custom_noise_opt is not None
+                else None,
+                custom_noise_blend=custom_noise_blend.clone()
+                if custom_noise_blend is not None
+                else None,
+                **overridecfg_kwargs,
+            ),
         )
         functools.update_wrapper(sampler_function, sampler.sampler_function)
         return (
@@ -1111,83 +1235,39 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
         cfg = ocs_override_sampler_cfg
         if cfg is None:
             raise ValueError("Override sampler config missing!")
+        icfg = cfg.immiscible
         if extra_args is None:
             extra_args = {}
-        (
-            sampler,
-            sampler_kwargs,
-            custom_noise,
-            cpu,
-            normalize,
-            noise_start_time,
-            noise_end_time,
-        ) = (
-            cfg[k]
-            for k in (
-                "sampler",
-                "sampler_kwargs",
-                "custom_noise",
-                "cpu_noise",
-                "normalize",
-                "noise_start_time",
-                "noise_end_time",
-            )
-        )
-        icfg = cfg["immiscible"]
-        (
-            isize,
-            ibatching,
-            ireference,
-            inorm_ref_scale,
-            inorm_noise_scale,
-            imaximize,
-            idistance_scale,
-            idistance_scale_ref,
-            istart_time,
-            iend_time,
-            iblend,
-            iblend_mode,
-        ) = (
-            icfg[k]
-            for k in (
-                "size",
-                "batching",
-                "reference",
-                "norm_ref_scale",
-                "norm_noise_scale",
-                "maximize",
-                "distance_scale",
-                "distance_scale_ref",
-                "start_time",
-                "end_time",
-                "blend",
-                "blend_mode",
-            )
-        )
-        sig = inspect.signature(sampler.sampler_function)
-        params = sig.parameters
-        kwargs |= {k: v for k, v in sampler_kwargs.items() if k in params}
+        sig = inspect.signature(cfg.sampler.sampler_function)
+        params = frozenset(cfg.force_params) | sig.parameters.keys()
+        kwargs |= {k: v for k, v in cfg.sampler_kwargs.items() if k in params}
         if "noise_sampler" in params:
+            seed = extra_args.get("seed")
+            seed_gen = torch.Generator(device="cpu" if cfg.cpu_noise else x.device)
+            seed_gen.manual_seed(seed if seed is not None else 0)
             model_sampling = model.inner_model.inner_model.model_sampling
             orig_noise_sampler = kwargs.pop(
                 "noise_sampler", lambda *_args, **_kwargs: torch.randn_like(x)
             )
-            if custom_noise is not None and noise_start_time < 1 and noise_end_time > 0:
-                seed = extra_args.get("seed")
+            if (
+                cfg.custom_noise is not None
+                and cfg.noise_start_time < 1
+                and cfg.noise_end_time > 0
+            ):
                 sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
-                custom_noise_sampler = custom_noise.make_noise_sampler(
+                custom_noise_sampler = cfg.custom_noise.make_noise_sampler(
                     x,
                     sigma_min,
                     sigma_max,
                     seed=seed,
-                    cpu=cpu,
+                    cpu=cfg.cpu_noise,
                     normalized=False,
                 )
             else:
                 custom_noise_sampler = None
             if custom_noise_sampler is not None:
-                sigma_start = model_sampling.percent_to_sigma(noise_start_time)
-                sigma_end = model_sampling.percent_to_sigma(noise_end_time)
+                sigma_start = model_sampling.percent_to_sigma(cfg.noise_start_time)
+                sigma_end = model_sampling.percent_to_sigma(cfg.noise_end_time)
 
                 def override_noise_sampler(s, sn, *args, **kwargs):
                     if not sigma_end <= s.max() <= sigma_start:
@@ -1197,51 +1277,124 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
             else:
                 override_noise_sampler = orig_noise_sampler
             if (
-                istart_time < 1
-                and iend_time > 0
-                and (isize > 1 if ibatching == "batch" else isize > 0)
-                and iblend != 0
+                icfg.start_time < 1
+                and icfg.end_time > 0
+                and (icfg.size > 1 if icfg.batching == "batch" else icfg.size > 0)
+                and icfg.blend != 0
             ):
-                isigma_start = model_sampling.percent_to_sigma(istart_time)
-                isigma_end = model_sampling.percent_to_sigma(iend_time)
-                if ibatching.startswith("cycle_"):
-                    ibatching = ibatching.split("_")[1:]
+                isigma_start = model_sampling.percent_to_sigma(icfg.start_time)
+                isigma_end = model_sampling.percent_to_sigma(icfg.end_time)
+                if icfg.batching.startswith("cycle_"):
+                    ibatching = icfg.batching.split("_")[1:]
+                else:
+                    ibatching = icfg.batching
                 immiscible = ImmiscibleNoise(
-                    size=isize,
+                    size=icfg.size,
                     batching=ibatching if isinstance(ibatching, str) else "channel",
-                    maximize=imaximize,
-                    distance_scale=idistance_scale,
-                    distance_scale_ref=idistance_scale_ref,
+                    maximize=icfg.maximize,
+                    distance_scale=icfg.distance_scale,
+                    distance_scale_ref=icfg.distance_scale_ref,
                 )
-                blend_function = filtering.BLENDING_MODES[iblend_mode]
+                blend_function = filtering.BLENDING_MODES[icfg.blend_mode]
 
                 ref_latent = None
-                ref_handlers = {
-                    "cond": "cond_denoised",
-                    "uncond": "uncond_denoised",
-                    "denoised": "denoised",
-                    "model_input": "input",
-                    "noise_prediction": lambda args: args["input"] - args["denoised"],
-                }
-                if (ref_handler := ref_handlers.get(ireference)) is None:
-                    raise ValueError("Bad immiscible reference type")
 
-                def postcfg(args):
-                    nonlocal ref_latent
-                    ref_latent = (
-                        args.get(ref_handler)
-                        if isinstance(ref_handler, str)
-                        else ref_handler(args)
-                    )
-                    return args["denoised"]
+                requires_patch = icfg.reference not in {"latent", "noise"}
 
-                extra_args = extra_args | {
-                    "model_options": set_model_options_post_cfg_function(
-                        extra_args.get("model_options", {}).copy(),
-                        postcfg,
-                        disable_cfg1_optimization=ireference == "uncond",
+                if requires_patch:
+                    requires_uncond = icfg.reference in {"uncond", "cond_sub_uncond"}
+                    ref_handlers = {
+                        "cond": "cond_denoised",
+                        "uncond": "uncond_denoised",
+                        "denoised": "denoised",
+                        "model_input": "input",
+                        "noise_prediction": lambda args: args["input"]
+                        - args["denoised"],
+                        "cond_sub_uncond": lambda args: args["cond_denoised"]
+                        - args["uncond_denoised"],
+                        "uncond_sub_cond": lambda args: args["uncond_denoised"]
+                        - args["cond_denoised"],
+                    }
+                    if (ref_handler := ref_handlers.get(icfg.reference)) is None:
+                        raise ValueError("Bad immiscible reference type")
+
+                    def postcfg(args):
+                        nonlocal ref_latent
+                        ref_latent = (
+                            args.get(ref_handler)
+                            if isinstance(ref_handler, str)
+                            else ref_handler(args)
+                        )
+                        return args["denoised"]
+
+                    extra_args = extra_args | {
+                        "model_options": set_model_options_post_cfg_function(
+                            extra_args.get("model_options", {}).copy(),
+                            postcfg,
+                            disable_cfg1_optimization=requires_uncond,
+                        )
+                    }
+
+                if icfg.reference == "noise":
+                    ns_ref = cfg.custom_noise_ref.make_noise_sampler(
+                        x,
+                        sigma_min,
+                        sigma_max,
+                        seed=torch.randint(
+                            0,
+                            1 << 32,
+                            (1,),
+                            device="cpu" if cfg.cpu_noise else x.device,
+                            dtype=torch.int64,
+                            generator=seed_gen,
+                        )
+                        .detach()
+                        .cpu()
+                        .item(),
+                        cpu=cfg.cpu_noise,
+                        normalized=False,
                     )
-                }
+                elif icfg.reference == "latent":
+                    ref_latent = cfg.latent_ref.to(
+                        dtype=x.dtype, device=x.device, copy=True
+                    )
+                    if icfg.norm_ref_scale != 0:
+                        ref_latent = scale_noise(
+                            ref_latent, icfg.norm_ref_scale, normalized=True
+                        )
+                    if ref_latent.shape[1:] != x.shape[1:]:
+                        raise ValueError(
+                            "Reference latent shape must match shape of generation with exception that batch size may be 1",
+                        )
+                    if ref_latent.shape[0] != x.shape[0]:
+                        if ref_latent.shape[0] == 1:
+                            ref_latent = ref_latent.expand(x.shape)
+                        else:
+                            raise ValueError(
+                                "Reference latent batch size must be either 1 or equal to generation batch size"
+                            )
+
+                if icfg.blend != 1 and cfg.custom_noise_blend is not None:
+                    ns_blend = cfg.custom_noise_blend.make_noise_sampler(
+                        x,
+                        sigma_min,
+                        sigma_max,
+                        seed=torch.randint(
+                            0,
+                            1 << 32,
+                            (1,),
+                            device="cpu" if cfg.cpu_noise else x.device,
+                            dtype=torch.int64,
+                            generator=seed_gen,
+                        )
+                        .detach()
+                        .cpu()
+                        .item(),
+                        cpu=cfg.cpu_noise,
+                        normalized=False,
+                    )
+                else:
+                    ns_blend = None
 
                 immiscible_counter = 0
 
@@ -1249,34 +1402,37 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                     nonlocal ref_latent, immiscible_counter
                     if not isigma_end <= s.max() <= isigma_start:
                         return override_noise_sampler(s, sn, *args, **kwargs)
-                    if ref_latent is None:
+                    if icfg.reference == "noise":
+                        ref_latent = ns_ref(s, sn)
+                    elif ref_latent is None:
                         raise ValueError("Immiscible reference type not available")
                     if not isinstance(ibatching, str):
                         immiscible.batching = ibatching[
                             immiscible_counter % len(ibatching)
                         ]
                     immiscible_counter += 1
-                    blending = iblend != 1
-                    if inorm_ref_scale != 0:
+                    blend_in_batch = icfg.blend != 1 and ns_blend is None
+                    # blending = icfg.blend != 1
+                    if icfg.norm_ref_scale != 0 and icfg.reference != "latent":
                         ref_latent = scale_noise(
-                            ref_latent, inorm_ref_scale, normalized=True
+                            ref_latent, icfg.norm_ref_scale, normalized=True
                         )
                     batch_size = ref_latent.shape[0]
                     noise_batch = torch.cat(
                         tuple(
                             override_noise_sampler(s, sn)
-                            for _ in range(max(1, isize) + int(blending))
+                            for _ in range(max(1, icfg.size) + int(blend_in_batch))
                         )
                     )
                     immiscible_noise = immiscible.unbatch(
                         immiscible.immiscible(
                             immiscible.batch(
                                 scale_noise(
-                                    noise_batch[batch_size * int(blending) :],
+                                    noise_batch[batch_size * int(blend_in_batch) :],
                                     1.0
-                                    if inorm_noise_scale == 0
-                                    else inorm_noise_scale,
-                                    normalized=inorm_noise_scale != 0,
+                                    if icfg.norm_noise_scale == 0
+                                    else icfg.norm_noise_scale,
+                                    normalized=icfg.norm_noise_scale != 0,
                                 )
                             ),
                             immiscible.batch(ref_latent),
@@ -1284,18 +1440,20 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                         ref_latent.shape,
                     )
                     immiscible_noise = scale_noise(
-                        immiscible_noise, normalized=normalize
+                        immiscible_noise, normalized=cfg.normalize
                     )
-                    if iblend != 1:
+                    if icfg.blend != 1:
                         immiscible_noise = blend_function(
-                            noise_batch[: batch_size * int(blending)],
+                            noise_batch[:batch_size]
+                            if blend_in_batch
+                            else ns_blend(s, sn),
                             immiscible_noise,
-                            iblend,
+                            icfg.blend,
                         )
-                    return scale_noise(immiscible_noise, normalized=normalize)
+                    return scale_noise(immiscible_noise, normalized=cfg.normalize)
 
             else:
-                if not normalize:
+                if not cfg.normalize:
                     noise_sampler = override_noise_sampler
                 else:
 
@@ -1306,11 +1464,116 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                         )
 
             kwargs["noise_sampler"] = noise_sampler
-        return sampler.sampler_function(
+        return cfg.sampler.sampler_function(
             model,
             x,
             sigmas,
             *args,
             extra_args=extra_args,
             **kwargs,
+        )
+
+
+class ExpressionFilteredNoiseItem(CustomNoiseItemBase):
+    def __init__(
+        self,
+        factor,
+        *,
+        normalize,
+        noise: object,
+        noise_filter,
+    ):
+        super().__init__(
+            factor,
+            noise=noise,
+            noise_filter=noise_filter,
+            normalize=normalize,
+        )
+
+    def clone_key(self, k):
+        if k == "noise":
+            return self.noise.clone()
+        return super().clone_key(k)
+
+    def make_noise_sampler(self, x, *args, normalized=True, **kwargs):
+        noise_filter = self.noise_filter
+        ns = self.noise.make_noise_sampler(x, *args, normalized=False, **kwargs)
+        normalize_noise = self.normalize != False and normalized  # noqa: E712
+        factor = self.factor
+
+        def noise_sampler(s, sn, *args, **kwargs):
+            noise = ns(s, sn)
+            refs = filtering.FilterRefs({
+                "sigma": s.clone() if isinstance(s, torch.Tensor) else s,
+                "sigma_next": sn.clone() if isinstance(sn, torch.Tensor) else sn,
+            })
+            noise = noise_filter.apply(noise, refs=refs)
+            return scale_noise(noise, factor, normalized=normalize_noise)
+
+        return noise_sampler
+
+
+class ExpressionFilteredNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
+    DESCRIPTION = "Immiscible noise that uses a latent reference."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        MODULES.initialize()
+        result = super().INPUT_TYPES()
+        result["required"] |= {
+            "normalize": (
+                ("default", "forced", "disabled"),
+                {
+                    "tooltip": "Controls whether the generated noise is normalized to 1.0 strength.",
+                },
+            ),
+            "custom_noise": (
+                WILDCARD_NOISE,
+                {
+                    "tooltip": "Input for custom noise used during ancestral or SDE sampling.",
+                },
+            ),
+            "yaml_config": (
+                "STRING",
+                {
+                    "default": "",
+                    "placeholder": """\
+# YAML or JSON filter definition
+""",
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "tooltip": "Enter your filter definition here. There is essentially no error handling.",
+                },
+            ),
+        }
+        return result
+
+    @classmethod
+    def get_item_class(cls):
+        return ExpressionFilteredNoiseItem
+
+    def go(
+        self,
+        *,
+        factor: float,
+        rescale: float,
+        normalize: str,
+        custom_noise: object,
+        yaml_config: str,
+    ) -> tuple:
+        config = yaml.safe_load(yaml_config)
+        if not isinstance(config, dict) or "filter" not in config:
+            raise ValueError(
+                "Bad YAML config type (must be object) or missing filter key in config"
+            )
+        filter_def = config.get("filter")
+        if not isinstance(filter_def, dict):
+            raise ValueError("Bad type for filter definition, must be object")
+        ocs_filter = filtering.make_filter(filter_def)
+        return super().go(
+            factor,
+            rescale=rescale,
+            normalize=self.get_normalize(normalize),
+            noise=custom_noise.clone(),
+            noise_filter=ocs_filter,
         )

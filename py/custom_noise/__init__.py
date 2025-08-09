@@ -7,4 +7,5 @@ NODE_CLASS_MAPPINGS = {
     "OCSNoise to SONAR_CUSTOM_NOISE": nodes.ToSonarNode,
     "OCSNoise Conditioning": nodes.NoiseConditioningNode,
     "OCSNoise OverrideSamplerNoise": nodes.SamplerNodeConfigOverride,
+    "OCSNoise ExpressionFilteredNoise": nodes.ExpressionFilteredNoiseNode,
 }
