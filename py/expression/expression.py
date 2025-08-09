@@ -1,6 +1,8 @@
 import re
 import operator
 
+from tqdm import tqdm
+
 from .parser import Parser, ParserSpec, ParseError
 from .types import (
     Empty,
@@ -58,7 +60,7 @@ class Expression:
 
     def eval(self, handlers, *args, **kwargs):
         if self.expr != ExpOp("default"):
-            print("\nEVAL", self.expr)
+            tqdm.write(f"* OCS: EVAL: {self.expr}")
         if not isinstance(self.expr, ExpBase):
             return self.expr
         return self.expr.eval(handlers, *args, **kwargs)
@@ -81,20 +83,25 @@ class Expression:
     def fixup_token(cls, t):
         if t == "":
             return t
+        if t[0] == "'":
+            return ExpSym(t[1:])
         t = t.lower()
         val = cls.FIXUP.get(t, Empty)
         if val is not Empty:
             return val
         if t[0] == "`":
             return ExpBinOp(t.strip("`"))
-        if t[0] == "'":
-            return ExpSym(t[1:])
         if (len(t) > 1 and t[0] == "-" and t[1].isdigit()) or t[0].isdigit():
             return float(t) if "." in t else int(t)
         return ExpOp(t)
 
     @classmethod
     def tokenize(cls, s):
+        s = "\n".join(
+            line.rstrip("\r")
+            for line in s.split("\n")
+            if not line.lstrip().startswith("#")
+        )
         yield from (cls.fixup_token(m.group(1)) for m in cls.EXPR_RE.finditer(s))
 
 

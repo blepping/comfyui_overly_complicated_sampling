@@ -9,7 +9,8 @@ from . import utils
 from .filtering import make_filter, FilterRefs, FILTER_HANDLERS
 from .noise import ImmiscibleNoise
 from .restart import Restart
-from .step_samplers import STEP_SAMPLERS, StepSamplerContext
+from .step_samplers import STEP_SAMPLERS
+from .step_samplers.base import StepSamplerContext
 from .substep_sampling import StepSamplerChain
 from .utils import check_time, fallback
 
@@ -38,6 +39,8 @@ class MergeSubstepsSampler:
         self.preview_mode = options.pop("preview_mode", "denoised")
         self.require_uncond = any(sampler.require_uncond for sampler in samplers)
         self.cfg_scale_override = options.pop("cfg_scale_override", None)
+        self.afs_start_step = options.pop("afs_start_step", 0)
+        self.afs_end_step = options.pop("afs_end_step", -1)
         self.options = options
 
     def check_match(self, handlers: None | object, *, ss: None | object = None):
@@ -58,23 +61,39 @@ class MergeSubstepsSampler:
         return operator.truth(self.when.eval(handlers))
 
     def step_input(self, x, *, ss=None):
+        ss = fallback(ss, self.ss)
+        ss.noise.update_x(x)
         if self.pre_filter is None:
             return x
-        ss = fallback(ss, self.ss)
-        return self.pre_filter.apply(x, refs=fallback(ss, self.ss).refs)
+        x = self.pre_filter.apply(x, refs=fallback(ss, self.ss).refs)
+        ss.noise.update_x(x)
+        return x
 
     def step_output(self, x, *, orig_x=None, ss=None):
+        ss = fallback(ss, self.ss)
+        ss.noise.update_x(x)
         if self.post_filter is None:
             return x
-        ss = fallback(ss, self.ss)
         refs = ss.refs if orig_x is None else ss.refs | FilterRefs({"orig_x": orig_x})
-        return self.post_filter.apply(x, refs=refs)
+        x = self.post_filter.apply(x, refs=refs)
+        ss.noise.update_x(x)
+        return x
 
     def __call__(self, x):
         orig_x = x
         x = self.step_input(x)
-        x = self.step(x)
+        if self.afs_start_step <= self.ss.step <= self.afs_end_step:
+            x = self.afs_step(x)
+        else:
+            x = self.step(x)
         return self.step_output(x, orig_x=orig_x)
+
+    # From https://arxiv.org/abs/2210.05475
+    def afs_step(self, x):
+        sigma, sigma_next = self.ss.sigma, self.ss.sigma_next
+        afs_d = x / ((1 + sigma**2).sqrt())
+        dt = sigma_next - sigma
+        return x + afs_d * dt
 
     def step(self, x):
         raise NotImplementedError
@@ -574,6 +593,79 @@ class LookaheadMergeSubstepsSampler(MergeSubstepsSampler):
         return x
 
 
+class PingpongMergeSubstepsSampler(MergeSubstepsSampler):
+    name = "pingpong"
+
+    def __init__(self, ss, group, **kwargs):
+        super().__init__(ss, group, **kwargs)
+        pingpong = self.options.pop("pingpong", {}).copy()
+        self.pingpong_s_noise = pingpong.pop("s_noise", 1.0)
+        immiscible = pingpong.get("immiscible", False)
+        self.immiscible = (
+            ImmiscibleNoise(**immiscible) if immiscible is not False else False
+        )
+
+        self.custom_noise = self.options.get("custom_noise")
+        if isinstance(self.custom_noise, str):
+            self.custom_noise = self.options.get(f"custom_noise_{self.custom_noise}")
+
+    def step(self, x):
+        orig_x = x.clone()
+        ss = self.ss
+        subss = self.ss.clone_edit(idx=ss.idx, sigmas=ss.sigmas)
+        substep = 0
+        max_idx = len(ss.sigmas) - 1
+        eff_substeps = min(max_idx - ss.idx, self.substeps)
+        pbar = tqdm.tqdm(total=eff_substeps, initial=0, disable=ss.disable_status)
+        for ssampler_ in self.samplers:
+            substeps_remain = eff_substeps - substep
+            if substeps_remain == 0:
+                break
+            with StepSamplerContext(ssampler_, subss) as ssampler:
+                for subidx in range(min(substeps_remain, ssampler.substeps)):
+                    subss.update(ss.idx + substep, substep=substep)
+                    pbar.set_description(
+                        f"substep({ssampler.name}): {subss.sigma.item():.03} -> {subss.sigma_next.item():.03}"
+                    )
+                    subss.hist.push(self.call_model(x, ss=subss))
+                    subss.refs = FilterRefs.from_ss(subss, have_current=True)
+                    if substep == 0:
+                        self.callback(ss=subss)
+                    sr = self.simple_substep(x, ssampler)
+                    x = sr.x
+                    noise_strength = sr.noise_scale
+                    if noise_strength != 0 and subss.sigma_next != 0:
+                        x = sr.noise_x(ss=subss)
+                    substep += 1
+                    pbar.update(1)
+                    if substeps_remain == 1:
+                        break
+        pbar.update(0)
+        if sr.sigma_next == 0:
+            return x
+        sigma, sigma_next = ss.sigma, ss.sigma_next
+        alpha = subss.sigma_next / sigma
+        synth_denoised = (x - alpha * orig_x) / (1 - alpha)
+        noise_sampler = ss.noise.make_caching_noise_sampler(
+            self.custom_noise,
+            1,
+            sigma,
+            sigma_next,
+            immiscible=fallback(self.immiscible, ss.noise.immiscible),
+        )
+        noise_refs = ss.refs | FilterRefs({
+            "orig_x": orig_x,
+            "x": x,
+            "denoised": synth_denoised,
+        })
+        noise = (
+            noise_sampler(sigma, sigma_next, refs=noise_refs) * self.pingpong_s_noise
+        )
+        if ss.model.is_rectified_flow:
+            return torch.lerp(synth_denoised, noise, sigma_next)
+        return synth_denoised + noise * sigma_next
+
+
 class DynamicMergeSubstepsSampler(MergeSubstepsSampler):
     name = "dynamic"
 
@@ -662,5 +754,6 @@ MERGE_SUBSTEPS_CLASSES = {
     "overshoot": OvershootMergeSubstepsSampler,
     "simple": SimpleSubstepsSampler,
     "lookahead": LookaheadMergeSubstepsSampler,
+    "pingpong": PingpongMergeSubstepsSampler,
     "dynamic": DynamicMergeSubstepsSampler,
 }

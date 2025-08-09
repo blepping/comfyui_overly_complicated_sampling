@@ -3,29 +3,43 @@ import os
 import torch
 import numpy as np
 import PIL.Image as PILImage
+from functools import partial
 
 from . import expression as expr
 from . import latent
+from . import unsafe_expression_whitelists
 
 from .external import MODULES as EXT
-from .utils import scale_noise, resolve_value
-from .latent import OCSTAESD, ImageBatch
+from .utils import scale_noise, resolve_value, quantile_normalize
+from .latent import OCSTAESD, ImageBatch, normalize_to_scale
+
 
 ALLOW_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS") is not None
 ALLOW_ALL_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_ALL_UNSAFE") is not None
 
-EXT_BLEH = EXT.get("bleh")
-EXT_SONAR = EXT.get("sonar")
-EXT_NNLATENTUPSCALE = EXT.get("nnlatentupscale")
+EXT_BLEH = EXT_SONAR = None
 
-if "bleh" in EXT:
-    BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES
-else:
-    BLENDING_MODES = {
-        "lerp": lambda a, b, t: (1 - t) * a + t * b,
-    }
+BLENDING_MODES = {
+    "lerp": torch.lerp,
+}
 
 HANDLERS = {}
+
+
+def init_integrations(integrations):
+    global EXT_BLEH, EXT_SONAR, BLENDING_MODES, HANDLERS
+    EXT_BLEH = integrations.bleh
+    EXT_SONAR = integrations.sonar
+    if EXT_BLEH is not None:
+        BLENDING_MODES = EXT_BLEH.latent_utils.BLENDING_MODES
+        HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
+    if EXT_SONAR is not None:
+        HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
+    if integrations.nnlatentupscale is not None:
+        HANDLERS["t_scale_nnlatentupscale"] = ScaleNNLatentUpscaleHandler()
+
+
+EXT.register_init_handler(init_integrations)
 
 
 class NormHandler(expr.BaseHandler):
@@ -40,6 +54,114 @@ class NormHandler(expr.BaseHandler):
         return scale_noise(tensor, factor, normalize_dims=dim)
 
     validate_output = expr.Arg.tensor("output")
+
+
+class QuantileNormHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numeric("quantile", 0.75),
+        expr.Arg.integer("dim", 1),
+        expr.Arg.boolean("flatten", True),
+        expr.Arg.numeric("norm_factor", 1.0),
+        expr.Arg.numeric("norm_power", 0.5),
+        expr.Arg.string("mode", "clamp"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, quantile, dim, flatten, norm_factor, norm_power, mode = (
+            self.safe_get_all(obj, getter)
+        )
+        return quantile_normalize(
+            tensor,
+            quantile=quantile,
+            dim=dim,
+            flatten=flatten,
+            nq_fac=norm_factor,
+            pow_fac=norm_power,
+            strategy=mode,
+        )
+
+
+class NormToScaleHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numeric("target_min", 0.0),
+        expr.Arg.numeric("target_max", 1.0),
+        expr.Arg.numscalar_sequence("dim", (-3, -2, -1)),
+    )
+
+    def handle(self, obj, getter):
+        tensor, tmin, tmax, dim = self.safe_get_all(obj, getter)
+        return normalize_to_scale(tensor, tmin, tmax, dim=dim)
+
+
+class ClampHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numeric("min", 0.0),
+        expr.Arg.numeric("max", 1.0),
+    )
+
+    def handle(self, obj, getter):
+        tensor, tmin, tmax = self.safe_get_all(obj, getter)
+        return torch.clamp(tensor, min=tmin, max=tmax)
+
+
+class StackHandler(NormHandler):
+    input_validators = (
+        expr.Arg.sequence("tensors", item_validator=expr.ValidateArg.validate_tensor),
+        expr.Arg.integer("dim", 1),
+    )
+
+    def handle(self, obj, getter):
+        tensors, dim = self.safe_get_all(obj, getter)
+        return torch.stack(tensors, dim)
+
+
+class CatHandler(StackHandler):
+    def handle(self, obj, getter):
+        tensors, dim = self.safe_get_all(obj, getter)
+        return torch.cat(tensors, dim)
+
+
+class ReshapeHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numscalar_sequence("shape"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, shape = self.safe_get_all(obj, getter)
+        return torch.reshape(tensor.clone(), shape)
+
+
+class IndexedCopyHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor_dest"),
+        expr.Arg.tensor("tensor_src"),
+        expr.Arg.tensor_slice("slice"),
+    )
+
+    def handle(self, obj, getter):
+        tensor1, tensor2, tensor_slice = self.safe_get_all(obj, getter)
+        result = tensor1.clone()
+        result[tensor_slice] = tensor2[tensor_slice]
+        return result
+
+
+class NewLikeHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.nested_sequence(
+            "values",
+            default=(),
+            item_validator=expr.ValidateArg.validate_numeric_scalar,
+        ),
+    )
+
+    def handle(self, obj, getter):
+        tensor, values = self.safe_get_all(obj, getter)
+        return torch.tensor(values, dtype=tensor.dtype, device=tensor.device)
 
 
 class MeanHandler(NormHandler):
@@ -68,11 +190,23 @@ class RollHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numeric_scalar("amount", 0.5),
-        expr.Arg.numscalar_sequence("dim", (-2,)),
+        expr.Arg.one_of(
+            "dim",
+            (
+                expr.ValidateArg.validate_integer,
+                partial(
+                    expr.ValidateArg.validate_sequence,
+                    item_validator=expr.ValidateArg.validate_integer,
+                ),
+            ),
+            default=-2,
+        ),
     )
 
     def handle(self, obj, getter):
         tensor, amount, dim = self.safe_get_all(obj, getter)
+        if not isinstance(dim, tuple):
+            dim = (dim,)
         if isinstance(amount, float) and amount < 1.0 and amount > -1.0:
             if len(dim) > 1:
                 raise ValueError(
@@ -105,9 +239,40 @@ class FlipHandler(NormHandler):
         out_slice = tuple(
             np.s_[:] if d != dim else np.s_[pivot:] for d in range(tensor.ndim)
         )
-        in_slice = tuple(np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim))
+        in_slice = tuple(
+            np.s_[:] if d != dim else np.s_[:pivot] for d in range(tensor.ndim)
+        )
         result[out_slice] = torch.flip(tensor[in_slice], dims=(dim,))
         return result
+
+
+class CopySignHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.tensor("other"),
+    )
+
+    def handle(self, obj, getter):
+        return torch.copysign(*self.safe_get_all(obj, getter))
+
+
+class CloneHandler(NormHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def handle(self, obj, getter):
+        return self.safe_get("tensor", obj, getter).clone()
+
+
+class NewFullHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numscalar_sequence("shape"),
+        expr.Arg.numeric("value", 0.0),
+    )
+
+    def handle(self, obj, getter):
+        tensor, shape, value = self.safe_get_all(obj, getter)
+        return tensor.new_full(shape, value)
 
 
 class BlendHandler(NormHandler):
@@ -130,11 +295,12 @@ class ContrastAdaptiveSharpeningHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numeric("scale", 0.5),
+        expr.Arg.boolean("normalize", True),
     )
 
     def handle(self, obj, getter):
-        t, scale = self.safe_get_all(obj, getter)
-        return latent.contrast_adaptive_sharpening(t, scale)
+        t, scale, normalize = self.safe_get_all(obj, getter)
+        return latent.contrast_adaptive_sharpening(t, scale, normalize=normalize)
 
 
 class ScaleHandler(NormHandler):
@@ -164,7 +330,6 @@ class ScaleHandler(NormHandler):
             scale = tuple(int(v) for v in scale)
         else:
             scale = (int(t.shape[-2] * scale[0]), int(t.shape[-1] * scale[1]))
-        print("SCALE", t.shape[-2:], "->", scale)
         if not all(v > 0 for v in scale):
             raise ValueError(f"Invalid scale: scale values must be > 0, got: {scale!r}")
         return latent.scale_samples(t, scale[1], scale[0], mode=mode)
@@ -180,7 +345,8 @@ class NoiseHandler(NormHandler):
         t, typ = self.safe_get_all(obj, getter)
         ctx = getter.ctx
         smin, smax, s, sn = (
-            ctx.get_var(k) for k in ("sigma_min", "sigma_max", "sigma", "sigma_next")
+            ctx.get_var(k, default=0.0)
+            for k in ("sigma_min", "sigma_max", "sigma", "sigma_next")
         )
         ns = latent.get_noise_sampler(typ, t, smin, smax, normalized=False)
         return ns(s, sn)
@@ -192,6 +358,55 @@ class ShapeHandler(expr.BaseHandler):
     def handle(self, obj, getter):
         t = self.safe_get("tensor", obj, getter)
         return expr.types.ExpTuple((*t.shape,))
+
+
+class GaussianBlur2DHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("kernel_size"),
+        expr.Arg.numeric_scalar("sigma"),
+    )
+
+    def handle(self, obj, getter):
+        return latent.gaussian_blur_2d(*self.safe_get_all(obj, getter))
+
+
+class SNFGuidanceHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("t_tensor"),
+        expr.Arg.tensor("s_tensor"),
+        expr.Arg.integer("t_kernel_size", 3),
+        expr.Arg.numeric_scalar("t_sigma", 1),
+        expr.Arg.integer("s_kernel_size", 3),
+        expr.Arg.numeric_scalar("s_sigma", 1),
+    )
+
+    def handle(self, obj, getter):
+        return latent.snf_guidance(*self.safe_get_all(obj, getter))
+
+
+class RGBLatentHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("reference"),
+        expr.Arg.numscalar_sequence("rgb"),
+    )
+
+    def handle(self, obj, getter):
+        ctx = getter.ctx.constants.ctx
+        model = ctx.get("model")
+        if model is None:
+            raise ValueError("Ohno")
+        reference, rgb = self.safe_get_all(obj, getter)
+        if len(rgb) != 3 or not all(0 <= v <= 1.0 for v in rgb):
+            raise ValueError("Bad RGB parameter")
+        img = torch.tensor(
+            tuple(v * 2 - 1.0 for v in rgb),
+            device=reference.device,
+            dtype=reference.dtype,
+        ).view(1, 3)
+        latent = torch.zeros_like(reference).movedim(1, -1)
+        latent += model.latent_format.rgb_to_latent(img)
+        return latent.movedim(-1, 1)
 
 
 class TAESDDecodeHandler(expr.BaseHandler):
@@ -282,295 +497,9 @@ class UnsafeTorchTensorMethodHandler(NormHandler):
 
         whitelist = AlwaysContains()
     elif ALLOW_UNSAFE:
-        whitelist = {
-            "abs",
-            "absolute",
-            "acos",
-            "acosh",
-            "add",
-            "addbmm",
-            "addcdiv",
-            "addcmul",
-            "addmm",
-            "addmv",
-            "addr",
-            "adjoint",
-            "all",
-            "allclose",
-            "amax",
-            "amin",
-            "aminmax",
-            "angle",
-            "any",
-            "arccos",
-            "arccosh",
-            "arcsin",
-            "arcsinh",
-            "arctan",
-            "arctan2",
-            "arctanh",
-            "argmax",
-            "argmin",
-            "argsort",
-            "argwhere",
-            "as_strided",
-            "asin",
-            "asinh",
-            "atan",
-            "atan2",
-            "atanh",
-            "baddbmm",
-            "bernoulli",
-            "bincount",
-            "bitwise_and",
-            "bitwise_left_shift",
-            "bitwise_not",
-            "bitwise_or",
-            "bitwise_right_shift",
-            "bitwise_xor",
-            "bmm",
-            "broadcast_to",
-            "ceil",
-            "cholesky",
-            "cholesky_inverse",
-            "cholesky_solve",
-            "chunk",
-            "clamp",
-            "clip",
-            "clone",
-            "conj",
-            "conj_physical",
-            "contiguous",
-            "copysign",
-            "corrcoef",
-            "cos",
-            "cosh",
-            "count_nonzero",
-            "cov",
-            "cross",
-            "cummax",
-            "cummin",
-            "cumprod",
-            "cumsum",
-            "deg2rad",
-            "det",
-            "detach",
-            "diag",
-            "diag_embed",
-            "diagflat",
-            "diagonal",
-            "diagonal_scatter",
-            "diff",
-            "digamma",
-            "dim",
-            "dist",
-            "div",
-            "divide",
-            "dot",
-            "dsplit",
-            "eq",
-            "equal",
-            "erf",
-            "erfc",
-            "erfinv",
-            "exp",
-            "expand",
-            "expand_as",
-            "expm1",
-            "fix",
-            "flatten",
-            "flip",
-            "fliplr",
-            "flipud",
-            "float_power",
-            "floor",
-            "floor_divide",
-            "fmax",
-            "fmin",
-            "fmod",
-            "frac",
-            "frexp",
-            "gather",
-            "gcd",
-            "ge",
-            "geqrf",
-            "ger",
-            "greater",
-            "greater_equal",
-            "gt",
-            "hardshrink",
-            "heaviside",
-            "histc",
-            "hsplit",
-            "hypot",
-            "i0",
-            "igamma",
-            "igammac",
-            "index_add",
-            "index_copy",
-            "index_fill",
-            "index_put",
-            "index_reduce",
-            "index_select",
-            "inner",
-            "inverse",
-            "isclose",
-            "isfinite",
-            "isinf",
-            "isnan",
-            "isneginf",
-            "isposinf",
-            "kthvalue",
-            "lcm()",
-            "ldexp",
-            "le",
-            "lerp",
-            "less",
-            "less_equal",
-            "lgamma",
-            "log",
-            "log10",
-            "log1p",
-            "log2",
-            "logaddexp",
-            "logaddexp2",
-            "logcumsumexp",
-            "logdet",
-            "logical_and",
-            "logical_not",
-            "logical_or",
-            "logical_xor",
-            "logit",
-            "logsumexp",
-            "lt",
-            "lu",
-            "lu_solve",
-            "masked_fill",
-            "masked_scatter",
-            "masked_select",
-            "matmul",
-            "matrix_exp",
-            "max",
-            "maximum",
-            "mean",
-            "median",
-            "min",
-            "minimum",
-            "mm",
-            "mode",
-            "moveaxis",
-            "movedim",
-            "msort",
-            "mul",
-            "multinomial",
-            "multiply",
-            "mv",
-            "mvlgamma",
-            "nan_to_num",
-            "nanmean",
-            "nanmedian",
-            "nanquantile",
-            "nansum",
-            "narrow",
-            "narrow_copy",
-            "ne",
-            "neg",
-            "negative",
-            "new_empty",
-            "new_full",
-            "new_ones",
-            "new_zeros",
-            "nextafter",
-            "nonzero",
-            "norm",
-            "not_equal",
-            "numel",
-            "orgqr",
-            "ormqr",
-            "outer",
-            "permute",
-            "polygamma",
-            "positive",
-            "pow",
-            "prod",
-            "qr",
-            "quantile",
-            "rad2deg",
-            "ravel",
-            "reciprocal",
-            "remainder",
-            "renorm",
-            "repeat",
-            "repeat_interleave",
-            "reshape",
-            "reshape_as",
-            "resolve_conj",
-            "resolve_neg",
-            "roll",
-            "rot90",
-            "round",
-            "rsqrt",
-            "scatter",
-            "scatter_add",
-            "scatter_reduce",
-            "select",
-            "select_scatter",
-            "sgn",
-            "sigmoid",
-            "sign",
-            "signbit",
-            "sin",
-            "sinc",
-            "sinh",
-            "slice_scatter",
-            "slogdet",
-            "smm",
-            "softmax",
-            "sort",
-            "sparse_mask",
-            "split",
-            "sqrt",
-            "square",
-            "squeeze",
-            "sspaddmm",
-            "std",
-            "stft",
-            "sub",
-            "subtract",
-            "sum",
-            "sum_to_size",
-            "svd",
-            "swapaxes",
-            "swapdims",
-            "t",
-            "take",
-            "take_along_dim",
-            "tan",
-            "tanh",
-            "tensor_split",
-            "tile",
-            "topk",
-            "transpose",
-            "triangular_solve",
-            "tril",
-            "triu",
-            "true_divide",
-            "trunc",
-            "unflatten",
-            "unfold",
-            "unique",
-            "unique_consecutive",
-            "unsqueeze",
-            "var",
-            "vdot",
-            "view",
-            "view_as",
-            "vsplit",
-            "where",
-            "xlogy",
-        }
+        whitelist = unsafe_expression_whitelists.TORCH_FUNCTION_WHITELIST
     else:
-        whitelist = set()
+        whitelist = frozenset()
 
     def handle(self, obj, getter):
         if "__method" in obj.kwargs or "__tensor" in obj.kwargs:
@@ -609,119 +538,120 @@ class UnsafeTorchHandler(expr.BaseHandler):
             return resolve_value(keys, torch)
 
 
-if EXT_BLEH:
+class BlehEnhanceHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.string("mode"),
+        expr.Arg.numeric_scalar("scale", 1.0),
+    )
+    output_validator = expr.Arg.tensor("output")
 
-    class BlehEnhanceHandler(expr.BaseHandler):
-        input_validators = (
-            expr.Arg.tensor("tensor"),
-            expr.Arg.string("mode"),
-            expr.Arg.numeric_scalar("scale", 1.0),
+    def handle(self, obj, getter):
+        tensor, mode, scale = self.safe_get_all(obj, getter)
+        return EXT_BLEH.latent_utils.enhance_tensor(
+            tensor, mode, scale=scale, adjust_scale=False
         )
-        output_validator = expr.Arg.tensor("output")
 
-        def handle(self, obj, getter):
-            tensor, mode, scale = self.safe_get_all(obj, getter)
-            return EXT_BLEH.latent_utils.enhance_tensor(
-                tensor, mode, scale=scale, adjust_scale=False
-            )
 
-    HANDLERS["t_bleh_enhance"] = BlehEnhanceHandler()
+class SonarPowerFilterHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.present("filter"),
+    )
+    output_validator = expr.Arg.tensor("output")
 
-if EXT_SONAR:
+    default_power_filter = {
+        "mix": 1.0,
+        "normalization_factor": 1.0,
+        "common_mode": 0.0,
+        "channel_correlation": "1,1,1,1,1,1",
+    }
 
-    class SonarPowerFilterHandler(expr.BaseHandler):
-        input_validators = (
-            expr.Arg.tensor("tensor"),
-            expr.Arg.present("filter"),
-        )
-        output_validator = expr.Arg.tensor("output")
-
-        default_power_filter = {
-            "mix": 1.0,
-            "normalization_factor": 1.0,
-            "common_mode": 0.0,
-            "channel_correlation": "1,1,1,1,1,1",
-        }
-
-        @classmethod
-        def make_power_filter(cls, fdict, *, toplevel=True):
-            fdict = fdict.copy()
-            compose_with = fdict.pop("compose_with", None)
-            if compose_with:
-                if not isinstance(compose_with, dict):
-                    raise TypeError("compose_with must be a dictionary")
-                fdict["compose_with"] = cls.make_power_filter(
-                    compose_with, toplevel=False
+    @classmethod
+    def make_power_filter(cls, fdict, *, toplevel=True):
+        fdict = fdict.copy()
+        compose_with = fdict.pop("compose_with", None)
+        if compose_with:
+            if not isinstance(compose_with, dict):
+                raise TypeError("compose_with must be a dictionary")
+            fdict["compose_with"] = cls.make_power_filter(compose_with, toplevel=False)
+        topargs = {k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()}
+        power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
+        if not toplevel:
+            return power_filter
+        cc = topargs.get("channel_correlation")
+        if cc is not None:
+            if not isinstance(cc, (list, tuple)) or not all(
+                isinstance(v, (int, float)) for v in cc
+            ):
+                raise TypeError(
+                    "Bad channel correlation type: must be comma separated string or numeric sequence"
                 )
-            topargs = {
-                k: fdict.pop(k, dv) for k, dv in cls.default_power_filter.items()
-            }
-            power_filter = EXT_SONAR.powernoise.PowerFilter(**fdict)
-            if not toplevel:
-                return power_filter
-            cc = topargs.get("channel_correlation")
-            if cc is not None:
-                if not isinstance(cc, (list, tuple)) or not all(
-                    isinstance(v, (int, float)) for v in cc
-                ):
-                    raise TypeError(
-                        "Bad channel correlation type: must be comma separated string or numeric sequence"
-                    )
-                topargs["channel_correlation"] = ",".join(repr(v) for v in cc)
-            return EXT_SONAR.powernoise.PowerNoiseItem(
-                1, power_filter=power_filter, time_brownian=True, **topargs
-            )
-
-        def handle(self, obj, getter):
-            tensor, filter_def = self.safe_get_all(obj, getter)
-            if not isinstance(filter_def, dict):
-                raise TypeError("filter argument must be a dictionary")
-            power_filter = self.make_power_filter(filter_def)
-            filter_rfft = power_filter.make_filter(tensor.shape).to(
-                tensor.device, non_blocking=True
-            )
-            ns = power_filter.make_noise_sampler_internal(
-                tensor,
-                lambda *_unused, latent=tensor: latent,
-                filter_rfft,
-                normalized=False,
-            )
-            return ns(None, None)
-
-    HANDLERS["t_sonar_power_filter"] = SonarPowerFilterHandler()
-
-if EXT_NNLATENTUPSCALE:
-    from .latent import scale_nnlatentupscale
-
-    class ScaleNNLatentUpscaleHandler(expr.BaseHandler):
-        input_validators = (
-            expr.Arg.tensor("tensor"),
-            expr.Arg.string("mode", "sd1"),
-            expr.Arg.numeric_scalar("scale", 2.0),
+            topargs["channel_correlation"] = ",".join(repr(v) for v in cc)
+        return EXT_SONAR.powernoise.PowerNoiseItem(
+            1, power_filter=power_filter, time_brownian=True, **topargs
         )
-        output_validator = expr.Arg.tensor("output")
 
-        def handle(self, obj, getter):
-            tensor, mode, scale = self.safe_get_all(obj, getter)
-            if mode not in {"sd1", "sdxl"}:
-                raise ValueError(
-                    "Bad mode for t_scale_nnlatentupscale: must be either sd15 or sdxl"
-                )
-            return scale_nnlatentupscale(mode, tensor, scale)
+    def handle(self, obj, getter):
+        tensor, filter_def = self.safe_get_all(obj, getter)
+        if not isinstance(filter_def, dict):
+            raise TypeError("filter argument must be a dictionary")
+        power_filter = self.make_power_filter(filter_def)
+        filter_rfft = power_filter.make_filter(tensor.shape).to(
+            tensor.device, non_blocking=True
+        )
+        ns = power_filter.make_noise_sampler_internal(
+            tensor,
+            lambda *_unused, latent=tensor: latent,
+            filter_rfft,
+            normalized=False,
+        )
+        return ns(None, None)
 
-    HANDLERS["t_scale_nnlatentupscale"] = ScaleNNLatentUpscaleHandler()
+
+class ScaleNNLatentUpscaleHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.string("mode", "sd1"),
+        expr.Arg.numeric_scalar("scale", 2.0),
+    )
+    output_validator = expr.Arg.tensor("output")
+
+    def handle(self, obj, getter):
+        tensor, mode, scale = self.safe_get_all(obj, getter)
+        if mode not in {"sd1", "sdxl"}:
+            raise ValueError(
+                "Bad mode for t_scale_nnlatentupscale: must be either sd15 or sdxl"
+            )
+        return latent.scale_nnlatentupscale(mode, tensor, scale)
+
 
 TENSOR_OP_HANDLERS = {
     "t_norm": NormHandler(),
+    "t_quantilenorm": QuantileNormHandler(),
+    "t_normtoscale": NormToScaleHandler(),
+    "t_normalize_to_scale": NormToScaleHandler(),
+    "t_reshape": ReshapeHandler(),
+    "t_clamp": ClampHandler(),
+    "t_cat": CatHandler(),
+    "t_stack": StackHandler(),
+    "t_indexed_copy": IndexedCopyHandler(),
+    "t_new_like": NewLikeHandler(),
     "t_mean": MeanHandler(),
     "t_std": StdHandler(),
     "t_blend": BlendHandler(),
     "t_roll": RollHandler(),
     "t_flip": FlipHandler(),
+    "t_clone": CloneHandler(),
+    "t_newfull": NewFullHandler(),
+    "t_copysign": CopySignHandler(),
     "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),
     "t_shape": ShapeHandler(),
+    "t_gaussianblur2d": GaussianBlur2DHandler(),
+    "t_rgb_latent": RGBLatentHandler(),
+    "t_snf_guidance": SNFGuidanceHandler(),
     "t_taesd_decode": TAESDDecodeHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),

@@ -24,16 +24,19 @@ _Note for Flux users_: Set `cfg1_uncond_optimization: true` in the `model` block
 
 ## Credits
 
-I can move code around but sampling math and creating samplers is far beyond my ability. I didn't write any of the original samplers:
+I can move code around but sampling math and creating samplers generally beyond my ability. I didn't write any of the original samplers:
 
-* Euler, Heun++2, DPMPP SDE, DPMPP 2S, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
-* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4, RKF45, dynamic RK(4) and Euler Dancing samplers based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
+* Euler, Heun++2, DPMPP SDE, DPMPP 2S, gradient estimation, RES multistep, DPM++ 2m, 2m SDE and 3m SDE samplers based on ComfyUI's implementation.
+* Reversible Heun, Reversible Heun 1s, RES, Trapezoidal, Bogacki, Reversible Bogacki, RK4, RKF45, dynamic RK(4), SENS and Euler Dancing samplers based on implementation from [https://github.com/Clybius/ComfyUI-Extra-Samplers](https://github.com/Clybius/ComfyUI-Extra-Samplers).
 * TTM JVP sampler based on implementation written by Katherine Crowson (but yoinked from the Extra-Samplers repo mentioned above).
 * Distance sampler based on implementation from https://github.com/Extraltodeus/DistanceSampler
 * IPNDM, IPNDM_V and DEIS adapted from https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py (I used the Comfy version as a reference).
+* PingPong sampler idea from https://github.com/ace-step/ACE-Step/ (implementation also referenced from that source).
 * Normal substep merge strategy based on implementation from https://github.com/Clybius/ComfyUI-Extra-Samplers
-* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and idea for sampling with it from https://github.com/Clybius
+* Immiscible noise processing based on implementation from https://github.com/kohya-ss/sd-scripts/pull/1395 and https://github.com/yhli123/Immiscible-Diffusion - idea for sampling with it and implementation help from https://github.com/Clybius
 * Precedence climbing (Pratt) expression parser based on implementation from https://github.com/andychu/pratt-parsing-demo
+
+Please notify me if I somehow missed appropriately crediting any code used here, any such ommissions are unintentional.
 
 This repo wouldn't be possible without building on the work of others. Thanks!
 
@@ -95,6 +98,9 @@ reta: 1.0
 
 # Parameters related to restart sampling.
 restart:
+    # When enabled, out of order sigmas will be detected as restart.
+    # You can disable this if you want to use OCS for something like unsampling.
+    enabled: true
     # Scales the noise added by restart sampling.
     s_noise: 1.0
     # Immiscible block same as described below.
@@ -104,13 +110,17 @@ restart:
 
 # The noise block allows defining global noise sampling parameters.
 noise:
-    # You can disable this to allow GPU noise generation. I believe it only makes a difference for Brownian.
+    # You can disable this to allow GPU noise generation.
     cpu_noise: true
 
     # ComfyUI has a bug where if you disable add_noise in the sampler, no seed gets set. If you
     # are manually noising a sample and have add_noise turned off then you should enable this if
     # you want reproducible generations.
-    set_seed: false
+    set_seed: true
+
+    # Only has an effect when set_seed is enabled. Will advance the RNG this many times to
+    # avoid the common mistake of using the same noise for sampling as the initial noise.
+    seed_offset: 1
 
     # Global scale scale for generated noise
     scale: 1.0
@@ -177,35 +187,31 @@ noise:
         # See: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html#scipy.optimize.linear_sum_assignment
         maximize: false
 
+        # Can be set to enable immiscible v2 mode. 0.0 is disabled, 0.1 is a reasonable value.
+        distance_scale: 0.0
+
+        # If null will use the same value as distance_scale.
+        distance_scale_ref: null
+
     filter: null
 
 
-# Model calls can be cached. This is very experimental: I don't recommend using it
-# unless you know what you're doing.
 model:
     # When enabled, skips generating uncond when you have CFG set to 1. Disabled by
     # default as stuff like CFG++ won't work without uncond. Useful to enable for
     # models like Flux that don't actually use CFG.
     cfg1_uncond_optimization: false
 
-    cache:
-        # The cache size.
-        size: 0
-
-        # Threshold for model call caching. For example if you have size=3 and threshold=1
-        # then model calls 1 through 3 will be cached, but model call 0 will not be (the first one).
-        # Additional explanation: Some samplers call the model multiple times per step. For example,
-        # Bogacki uses three model calls: 0, 1, 2
-        threshold: 1
-
-        # Maximum use count for cache items.
-        max_use: 1000000
-
     filter:
+        # Input to the model
         input: null
+        # Result after CFG calculation
         denoised: null
+        # Result after CFG calculation for JVP
         jdenoised: null
+        # Cond - positive prompt
         cond: null
+        # Uncond - negative prompt
         uncond: null
 ```
 
@@ -236,6 +242,7 @@ When running multiple substeps per step, the results will combined based on the 
 * `supreme_avg`: The model is called at least once per step (and possibly additional times for higher order samplers). Each substep shares the first model call result. The results are averaged together. *Note*: Since the first model call is shared and the initial input is the same for each substep, there is no point in running multiple identical substeps. Also note: This merge strategy doesn't work well with non-ancestral samplers (i.e. dpmpp_2m or any sampler with `eta: 0`).
 * `overshoot`: The model is called at least once per step. It will sample steps equal to the number of substeps, starting from the current step. Then it will restart back to the expected step.
 * `lookahead`: Similar to `overshoot`, it samples ahead based on the number of substeps. The last model prediction is used to do a Euler step to the expected step. *Note:* Very experimental, likely to change in the future.
+* `pingpong`: Works similar to `overshoot` and `lookahead` methods except it does a pingpong sampler style step to the expected sigma.
 * `dynamic`: Allows specifying the group parameters as an expression to be evaluated. See below.
 
 **Dynamic Groups**: When `merge_method` is set to `dynamic` you must specify a `dynamic` block in the text parameters. The dynamic block may be either a string with the expression or a list of objects with an (optional) `when` key and a (required) `expression` key. The expression should return a dictionary of parameters you can set in the node (including both keys/values from the text parameters and widgets in the node). The first matching item will be used. Example:
@@ -331,6 +338,11 @@ lookahead:
     immiscible:
         size: 0
 
+# Only used by the pingpong merge method.
+pingpong:
+    # Scales the noise added by lookahead sampling.
+    s_noise: 1.0
+
 pre_filter: null
 
 post_filter: null
@@ -347,36 +359,43 @@ post_filter: null
 In alphabetical order.
 
 * `adapter`: Wraps a normal ComfyUI `SAMPLER`. Attach a `SAMPLER` parameter to the node. Note: Samplers that do unusual stuff like try to manipulate the model won't work. ComfyUI's built-in CFG++ samplers in particular do not work here.
+* `blep_bas`: Batch Augmented Sampler. My own dumb experiment that expands the batch and averages the result. May be very slow/require a lot of VRAM. See parameters: `bas`
+* `blep_euler_cycle`: See parameters: `cycle_pct`.
+* `blep_weoon`: Wavelet-based second order sampler. Another dumb experiment. See parameters: `weoon`
 * `bogacki`: Bogacki-Shampine sampler. Also has a reversible variant.
+* `clybius_euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`.
+* `clybius_sens`: Reversible dpmpp_3m_sde variant. Supports a separate set of reversible parameters in `tsde_reversible`.
 * `deis`: See parameters: `history_limit`. Does not work well with ETA, I don't recommending leaving ETA at the default 1.
-* `distance`: See parameters: `distance`. Adaptive-ish/configurable step variant of Heun. Taken from: https://github.com/Extraltodeus/DistanceSampler
-* `dpmpp_2m_sde`: See parameters: `history_limit`.
+* `dpm2`: Set `eta: 0` for non-ancestral variant.
+* `dpmpp_2m_sde`: Also supports reversible parameters. See parameters: `history_limit`.
 * `dpmpp_2m`: `eta` and `s_noise` parameters are ignored. See parameters: `history_limit`.
 * `dpmpp_2s`
 * `dpmpp_3m_sde`: See parameters: `history_limit`.
 * `dpmpp_sde`
 * `dynamic`: Advanced step method that allows using an expression to determine the sampler parameters at each substep. See below for a more detailed explanation.
-* `euler_cycle`: See parameters: `cycle_pct`.
-* `euler_dancing`: Pretty broken currently, will probably require increased `s_noise` values. See parameters: `deta`, `leap`, `deta_mode`.
 * `euler`: If samplers came in vanilla.
-* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`.
+* `extraltodeus_distance`: Adaptive-ish/configurable step variant of Heun. Referenced from [https://github.com/Extraltodeus/DistanceSampler](https://github.com/Extraltodeus/DistanceSampler). See parameters: `distance`.
+* `gradient_estimation`
 * `heun_1s`: Alternate Heun one step implementation. Supports reversible parameters.
+* `heun`: Alternate Heun implementation. Supports reversible parameters. See parameters: `history_limit`.
 * `heunpp`: See parameters: `max_order`.
 * `ipndm_v`: See parameters: `history_limit`.
 * `ipndm`: See parameters: `history_limit`.
+* `pingpong`
 * `res`: Refined Exponential Solver. I believe this is a variant of Heun. Generally works very well.
+* `res_multistep`
 * `reversible_bogacki`: Reversible variant of Bockacki-Shampine.
-* `reversible_heun`: Reversible variant of Heun.
 * `reversible_heun_1s`: Reversible variant of Heun 1 step. See parameters: `history_limit`.
-* `rk4`: Range-Kutta 4th order sampler.
-* `rkf45`: 5 model call flavor of RK.
+* `reversible_heun`: Reversible variant of Heun.
 * `rk_dynamic`: Variant of RK4 that lets you set `max_order` (you can also set it to `0` to choose an order dynamically, doesn't seem to work so well though).
+* `rk4`: Runge-Kutta 4th order sampler.
+* `rkf45`: 5 model call flavor of RK.
 * `solver_diffrax`: Uses the [Diffrax](https://github.com/patrick-kidger/diffrax) solver backend. See `de_*` parameters below.
 * `solver_torchdiffeq`: Uses the [torchdiffeq](https://github.com/rtqichen/torchdiffeq) backend. See `de_*` parameters below.
 * `solver_torchode`: Uses the [torchode]((https://github.com/martenlienen/torchode)) backend. See `de_*` parameters below.
 * `solver_torchsde`: Uses the [torchsde](https://github.com/google-research/torchsde) backend. See `de_*` parameters below.
-* `trapezoidal`:
 * `trapezoidal_cycle`: See parameters: `cycle_pct`.
+* `trapezoidal`:
 * `ttm_jvp`: TTM is a weird sampler. If you're using model caching you must make sure the entries TTM uses are populated first (by having it run before any other samplers that call the model multiple times). It may also not work with some other model patches and upscale methods. See parameters: `alternate_phi_2_calc`
 
 **Sampler Feature Support**
@@ -384,40 +403,46 @@ In alphabetical order.
 |Name|Cost|History|Order|Reversible|CFG++|
 |-|-|-|-|-|-|
 |`adapter`|?|?|?|?|?|
+|`blep_bas`|variable|||||
+|`blep_euler_cycle`|1||||X|
+|`blep_trapezoidal_cycle`|2|||||
+|`blep_weoon`|2|||||
 |`bogacki`|2|||||
+|`clybius_euler_dancing`|1|||||
+|`clybius_sens`|1|1||||
 |`deis`|1|1-3 (1)||||
-|`distance`|variable|||||
 |`dpmpp_2m_sde`|1|1||||
 |`dpmpp_2m`|1|1||||
 |`dpmpp_2s`|2|||||
 |`dpmpp_3m_sde`|1|1-2 (2)||||
 |`dpmpp_sde`|2|||||
 |`dynamic`|?|?|?|?|?|
-|`euler_cycle`|1||||X|
-|`euler_dancing`|1|||||
 |`euler`|1||||X|
-|`heun`|2|||X||
+|`extraltodeus_distance`|variable|||||
+|`gradient_estimation`|1|1||||
 |`heun_1s`|1|1||X||
+|`heun`|2|||X||
 |`heunpp`|1-3||X|||
 |`ipndm_v`|1|1-3 (1)||||
 |`ipndm`|1|1-3 (1)||||
+|`pingpong`|1|||||
 |`res`|2|||||
+|`res_multistep`|1|1||||
 |`reversible_bogacki`|2|||X||
-|`reversible_heun`|2|||X||
 |`reversible_heun_1s`|1|1||X||
+|`reversible_heun`|2|||X||
+|`rk4`|1-4|||||
 |`rk4`|4|||||
 |`rkf45`|5|||||
-|`rk4`|1-4|||||
 |`solver_diffrax`|variable|||||
 |`solver_torchdiffeq`|variable|||||
 |`solver_torchode`|variable|||||
 |`solver_torchsde`|variable|||||
 |`trapezoidal`|2|||||
-|`trapezoidal_cycle`|2|||||
 |`ttm_jvp`|2|||||
 
 
-`deis`, `ipndm*` do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
+`deis`, `ipndm*` and `gradient_estimation` do not seem to work well with ancestralness, I recommend `eta: 0.25` or disable it completely.
 
 **Solver Backend Samplers**:
 
@@ -503,15 +528,25 @@ cfgpp: false
 
 ### Reversible Settings ###
 
-# Reversible ETA (used for reversible samplers).
-reta: 1.0
-# Scale of the reversible correction. Can also be set to a negative value.
-reversible_scale: 1.0
-# No effect unless both start and end are set. Will scale the reta value based on the
-# percentage of sampling. In other words, reta*dyn_reta_start at the beginning,
-# reta*dyn_reta_end at the end.
-dyn_reta_start: null
-dyn_reta_end: null
+reversible:
+  # 0-indexed step where reversible sampling will start.
+  start_step: 0
+  # 0-indexed last step where reversible sampling will be used.
+  end_step: 9999
+  # Scale of the reversible correction. Can also be set to a negative value.
+  scale: 1.0
+  # Reversible ETA.
+  eta: 1.0
+
+  # No effect unless both start and end are set. Will scale the eta value based on the
+  # percentage of sampling. In other words, reta*dyn_reta_start at the beginning,
+  # reta*dyn_reta_end at the end.
+  dyn_eta_start: null
+  dyn_eta_end: null
+
+  eta_retry_increment: 0.0
+  # Might not do anything currently.
+  use_cfgpp: false
 
 pre_filter: null
 
@@ -594,6 +629,99 @@ diffrax_g_time_scaling: false
 # i.e. if you'd get 1,2,3,4 as g values for the step, with this it would be 1,2,-3,-4.
 diffrax_g_split_time_mode: false
 
+# blep_bas sampler-specific parameters
+bas:
+  # Batch expansion factor. Whatever your original batch size was will be multiplied
+  # by this. If it's 0 then you just get normal Euler.
+  batch_multiplier: 2
+  # First 0-indexed step when BAS sampling will apply.
+  start_step: 0
+  # Last 0-index step when BAS sampling will apply.
+  end_step: 3
+
+  s_noise: 1.0
+  eta: 0.0
+  eta_retry_increment: 0.0
+
+  # List of weights for the denoised batches, with 0 being the original denoised.
+  # If the list is smaller than the batch size, the list will be padded with the
+  # last item.
+  # If set to null it will be calculated automatically.
+  # Example: [0.5, 1.0]
+  # Will use weight 0.5 for the original denoised and 1.0 for any other items.
+  denoised_factors: null
+
+  # If set to something other than 0 the supplied denoised_factors will be rebalanced
+  # to add up to this number.
+  denoised_factors_scale: 1.0
+
+  # Global multiplier on denoised for BAS steps.
+  denoised_multiplier: 1.0
+
+  # One of: restart, restart_noneta, simple
+  renoise_mode: restart
+
+  # Multiplier on the start sigma for BAS steps.
+  # Note that taking the multipliers into account sigma_next must be less than sigma.
+  fromstep_factor: 1.0
+
+  # Multiplier on the end sigma for BAS steps.
+  tostep_factor: 1.0
+
+  # Source for the downstep. Can be one of dt, sigma or sigma_next.
+  # dt means you get bsigma + (sigma_next - bsigma) * tostep_factor
+  # where bsigma = sigma * fromstep_factor
+  tostep_source: dt
+
+# blep_weoon sampler-specific options.
+# Parameters with "inv" in the name apply to the inverse wavelet operation.
+# When set to null, they will use the normal setting.
+weoon:
+  start_step: 0
+  end_step: 9999
+  eta: 0.0
+  eta_retry_increment: 0.0
+  s_noise: 1.0
+  # One of dwt, dwt1d, dtcwt
+  wavelet_mode: dwt
+  # Padding scheme used for wavelets
+  padding: periodization
+  # Padding scheme used for the inverse wavelet operation
+  inv_padding: null
+  # Wavelet type. Does not apply if wavelet_mode is dtcwt.
+  wave: db4
+  # Wavelet type used for the inverse wavelet operation. Does not apply if wavelet_mode is dtcwt.
+  inv_wave: null
+  # dtcwt qshift parameter. Only applies if the wavelet mode is dtcwt.
+  dtcwt_qshift: qshift_a
+  # dtcwt biort parameter. Only applies if the wavelet mode is dtcwt.
+  dtcwt_biort: near_sym_a
+  # dtcwt qshift parameter used for the inverse wavelet operation. Only applies if the wavelet mode is dtcwt.
+  dtcwt_inv_qshift: null
+  # dtcwt biort parameter used for the inverse wavelet operation. Only applies if the wavelet mode is dtcwt.
+  dtcwt_inv_biort: null
+  # Can be used to stretch the step down. I.E. 1.0 would be sigma -> sigma_next
+  # while 2.0 would be twice the distance between sigma and sigma_next.
+  downstep_scale: 1.0
+  # Blend scale for the downstep denoised lowpass wavelets
+  yl_strength: 1.0
+  # Blend scale for the downstep denoised highpass wavelets
+  yh_strength: 0.5
+  # Mode used for blending wavelets.
+  wavelet_blend_mode: lerp
+  # Blend mode for wavelet highpass, uses wavelet_blend_mode if null.
+  wavelet_blend_mode_yh: null
+  # Extra multipliers that can be applied to the low/highpass wavelets for the normal
+  # denoised or downstep denoised.
+  denoised_yl_multiplier: 1.0
+  denoised_yh_multiplier: 1.0
+  denoised_down_yl_multiplier: 1.0
+  denoised_down_yh_multiplier: 1.0
+  # Only applies when wavelet_mode is dwt1d. Can be:
+  #   2: Flatten starting at spatial dimensions
+  #   1: Flatten starting at channels dimension
+  #   0: Smash everything together!
+  flatten_start_dim: 2
 
 ### Other Sampler Specific Parameters ###
 
@@ -606,6 +734,7 @@ diffrax_g_split_time_mode: false
 #   ipndm: 1 (max 3)
 #   ipndm_v: 1 (max 3)
 #   deis: 1 (max 3)
+#   clybius_sens: 2
 history_limit: 999 # Varies based on sampler.
 
 # Used for some samplers with variable order. List of samplers and default value below:

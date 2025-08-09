@@ -212,6 +212,8 @@ class BetweenHandler(BaseHandler):  # Inclusive
 
     def handle(self, obj, getter):
         value, low, high = self.safe_get_all(obj, getter)
+        if low > high:
+            low, high = high, low
         return low <= value <= high
 
 
@@ -281,9 +283,17 @@ class GetHandler(BaseHandler):
 
 class S_Handler(BaseHandler):
     input_validators = (
-        Arg.integer("start", None),
-        Arg.integer("end", None),
-        Arg.integer("step", None),
+        Arg.one_of(
+            "start",
+            (ValidateArg.validate_none, ValidateArg.validate_integer),
+            default=None,
+        ),
+        Arg.one_of(
+            "end",
+            (ValidateArg.validate_none, ValidateArg.validate_integer),
+            default=None,
+        ),
+        Arg.integer("step", 1),
     )
 
     def handle(self, obj, getter):

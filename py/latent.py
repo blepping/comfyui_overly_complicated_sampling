@@ -11,6 +11,20 @@ from comfy import latent_formats
 
 from .external import MODULES as EXT
 
+EXT_NNLATENTUPSCALE = None
+
+
+def init_integrations(integrations):
+    global get_noise_sampler, EXT_NNLATENTUPSCALE
+
+    ext_sonar = integrations.sonar
+    if ext_sonar is not None:
+        get_noise_sampler = ext_sonar.noise.get_noise_sampler
+    EXT_NNLATENTUPSCALE = EXT.nnlatentupscale
+
+
+EXT.register_init_handler(init_integrations)
+
 
 def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
     min_val, max_val = (
@@ -25,31 +39,32 @@ def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
     )
 
 
+# Improvements by https://github.com/Clybius
 # The following is modified to work with latent images of ~0 mean from https://github.com/Jamy-L/Pytorch-Contrast-Adaptive-Sharpening/tree/main.
-def contrast_adaptive_sharpening(x, amount=0.8, *, epsilon=1e-06):
-    """
-    Performs a contrast adaptive sharpening on the batch of images x.
-    The algorithm is directly implemented from FidelityFX's source code,
-    that can be found here
-    https://github.com/GPUOpen-Effects/FidelityFX-CAS/blob/master/ffx-cas/ffx_cas.h
+# The algorithm is directly implemented from FidelityFX's source code that can be found here: https://github.com/GPUOpen-Effects/FidelityFX-CAS/blob/master/ffx-cas/ffx_cas.h.
+def contrast_adaptive_sharpening(  # noqa: PLR0914
+    x,
+    amount=0.8,
+    *,
+    normalize=True,
+    epsilon=1e-06,
+):
+    orig_shape = x.shape
+    if x.ndim == 5:
+        x = x.reshape(orig_shape[0], orig_shape[1] * orig_shape[2], *orig_shape[-2:])
+    elif x.ndim != 4:
+        raise ValueError(
+            "Contrast-adaptive sharpening requires a tensor with 4 or 5 dimensions",
+        )
 
-    Parameters
-    ----------
-    x : Tensor
-        Image or stack of images, of shape [batch, channels, ny, nx].
-        Batch and channel dimensions can be ommited.
-    amount : int [0, 1]
-        Amount of sharpening to do, 0 being minimum and 1 maximum
-
-    Returns
-    -------
-    Tensor
-        Processed stack of images.
-
-    """
-
-    def on_abs_stacked(tensor_list, f, *args, **kwargs):
+    def on_abs_stacked(tensor_list, f, *args: list, **kwargs: dict):
         return f(torch.abs(torch.stack(tensor_list)), *args, **kwargs)[0]
+
+    if normalize:
+        luminance = torch.linalg.vector_norm(x, dim=1, keepdim=True).add_(1e-08)
+        x = x / luminance
+        orig_mean = x.mean(dim=(-3, -2, -1), keepdim=True)
+        x -= orig_mean
 
     x_padded = F.pad(x, pad=(1, 1, 1, 1))
     x_padded = torch.complex(x_padded, torch.zeros_like(x_padded))
@@ -102,7 +117,12 @@ def contrast_adaptive_sharpening(x, amount=0.8, *, epsilon=1e-06):
     div = torch.reciprocal(1 + 4 * w)
     output = ((b + d + f + h) * w + e) * div
 
-    return output.real.clamp(x.min(), x.max())
+    output = output.real
+    for ob, xb in zip(x, output):
+        ob.clamp_(*xb.aminmax())
+    if normalize:
+        output = output.add_(orig_mean).mul_(luminance)
+    return output.reshape(*orig_shape)
 
 
 class ImageBatch(tuple):
@@ -145,24 +165,11 @@ class OCSTAESD:
     @classmethod
     def decode(cls, fmt, latent):
         latent_format = cls.latent_formats[fmt]
-        # rv = latent_format.process_out(1.0)
         filename = cls.get_taesd_path(cls.get_decoder_name(fmt))
         model = TAESD(
             decoder_path=filename, latent_channels=latent_format.latent_channels
         ).to(latent.device)
-        # print("DEC INPUT ORIG", latent.min(), latent.max())
-        # if torch.any(latent.max() > rv) or torch.any(latent.min() < -rv):
-        #     sv = latent.new((-rv, rv))
-        #     latent = normalize_to_scale(
-        #         latent,
-        #         latent.amin(dim=(-3, -2, -1), keepdim=True).maximum(sv[0]),
-        #         latent.amax(dim=(-3, -2, -1), keepdim=True).minimum(sv[1]),
-        #         dim=(-3, -2, -1),
-        #     )
-        # print("DEC INPUT", latent.min(), latent.max())
-        # result = model.decode(latent.clamp(-rv, rv)).movedim(1, 3)
         result = model.decode(latent).movedim(1, 3)
-        # print("DEC RESULT", result.shape, result.isnan().any().item())
         return ImageBatch(
             latent_preview.preview_to_image(result[batch_idx])
             for batch_idx in range(result.shape[0])
@@ -190,80 +197,143 @@ class OCSTAESD:
             encoder_path=filename, latent_channels=latent_format.latent_channels
         ).to(device=latent.device)
         result = model.encode(cls.img_to_encoder_input(imgbatch).to(latent.device))
-        # print(
-        #     "ENC RESULT ORIG",
-        #     result.min(),
-        #     result.max(),
-        # )
-        # if torch.any(result.max() > rv) or torch.any(result.min() < -rv):
-        #     sv = result.new((-rv, rv))
-        #     result = normalize_to_scale(
-        #         result,
-        #         result.amin(dim=(-3, -2, -1), keepdim=True).maximum(sv[0]),
-        #         result.amax(dim=(-3, -2, -1), keepdim=True).minimum(sv[1]),
-        #         dim=(-3, -2, -1),
-        #     )
-        # print(
-        #     "ENC RESULT",
-        #     result.shape,
-        #     result.isnan().any().item(),
-        #     result.min(),
-        #     result.max(),
-        # )
         return result.to(latent.dtype).clamp(-rv, rv)
 
 
-if "bleh" in EXT:
-    scale_samples = EXT["bleh"].latent_utils.scale_samples
-    UPSCALE_METHODS = EXT["bleh"].latent_utils.UPSCALE_METHODS
-else:
-    UPSCALE_METHODS = ("bicubic", "bislerp", "bilinear", "nearest-exact", "area")
-
-    def scale_samples(
-        samples,
-        width,
-        height,
-        mode="bicubic",
-        sigma=None,  # noqa: ARG001
-    ):
-        if mode == "bislerp":
-            return bislerp(samples, width, height)
-        return F.interpolate(samples, size=(height, width), mode=mode)
+bleh_scale_samples = None
+UPSCALE_METHODS = ("bicubic", "bislerp", "bilinear", "nearest-exact", "area")
 
 
-if "sonar" in EXT:
-    get_noise_sampler = EXT["sonar"].noise.get_noise_sampler
-else:
+def scale_samples(
+    samples,
+    width,
+    height,
+    mode="bicubic",
+    sigma=None,  # noqa: ARG001
+):
+    global bleh_scale_samples, UPSCALE_METHODS
+    if bleh_scale_samples is None:
+        bleh = EXT.get("bleh")
+        if bleh is not None:
+            bleh_scale_samples = bleh.latent_utils.scale_samples
+            UPSCALE_METHODS = bleh.latent_utils.UPSCALE_METHODS
+        else:
+            bleh_scale_samples = False
+    if bleh_scale_samples:
+        return bleh_scale_samples(samples, width, height, mode=mode, sigma=sigma)
+    if mode == "bislerp":
+        return bislerp(samples, width, height)
+    return F.interpolate(samples, size=(height, width), mode=mode)
 
-    def get_noise_sampler(noise_type, x, *_args: list, **_kwargs: dict):
-        if noise_type != "gaussian":
-            raise ValueError("Only gaussian noise supported")
-        return lambda _s, _sn: torch.randn_like(x)
+
+def get_noise_sampler(noise_type, x, *_args: list, **_kwargs: dict):  # noqa: F811
+    if noise_type != "gaussian":
+        raise ValueError("Only gaussian noise supported")
+    return lambda _s, _sn: torch.randn_like(x)
 
 
-if "nnlatentupscale" in EXT:
-
-    def scale_nnlatentupscale(
-        mode,
-        latent,
-        scale=2.0,
-        *,
-        scale_factor=0.13025,
-        __nlu_module=EXT["nnlatentupscale"],
-    ):
-        module = __nlu_module
-        mode = {"sdxl": "SDXL", "sd1": "SD 1.x"}.get(mode)
-        if mode is None:
-            raise ValueError("Bad mode")
-        node = module.NNLatentUpscale()
-        model = module.latent_resizer.LatentResizer.load_model(
-            node.weight_path[mode], latent.device, latent.dtype
-        ).to(device=latent.device)
-        result = (
-            model(scale_factor * latent, scale=scale).to(
-                dtype=latent.dtype, device=latent.device
-            )
-            / scale_factor
+def scale_nnlatentupscale(mode, latent, scale=2.0, *, scale_factor=0.13025):
+    if EXT_NNLATENTUPSCALE is None:
+        raise RuntimeError("nnlatentupscale integration not available")
+    mode = {"sdxl": "SDXL", "sd1": "SD 1.x"}.get(mode)
+    if mode is None:
+        raise ValueError("Bad mode")
+    node = EXT_NNLATENTUPSCALE.NNLatentUpscale()
+    model = EXT_NNLATENTUPSCALE.latent_resizer.LatentResizer.load_model(
+        node.weight_path[mode], latent.device, latent.dtype
+    ).to(device=latent.device)
+    result = (
+        model(scale_factor * latent, scale=scale).to(
+            dtype=latent.dtype, device=latent.device
         )
-        del model
-        return result
+        / scale_factor
+    )
+    del model
+    return result
+
+
+# Gaussian blur
+def gaussian_blur_2d(img, kernel_size, sigma):
+    height = img.shape[-1]
+    kernel_size = min(kernel_size, height - (height % 2 - 1))
+    ksize_half = (kernel_size - 1) * 0.5
+
+    x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)
+
+    pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+
+    x_kernel = pdf / pdf.sum()
+    x_kernel = x_kernel.to(device=img.device, dtype=img.dtype)
+
+    kernel2d = torch.mm(x_kernel[:, None], x_kernel[None, :])
+    kernel2d = kernel2d.expand(img.shape[-3], 1, kernel2d.shape[0], kernel2d.shape[1])
+
+    padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
+
+    img = torch.nn.functional.pad(img, padding, mode="reflect")
+    img = torch.nn.functional.conv2d(img, kernel2d, groups=img.shape[-3])
+
+    return img
+
+
+# Saliency-adaptive Noise Fusion based on High-fidelity Person-centric Subject-to-Image Synthesis (Wang et al.)
+# https://github.com/CodeGoat24/Face-diffuser/blob/edff1a5178ac9984879d9f5e542c1d0f0059ca5f/facediffuser/pipeline.py#L535-L562
+def snf_guidance(
+    t_guidance: torch.Tensor,
+    s_guidance: torch.Tensor,
+    t_kernel_size=3,
+    t_sigma=1,
+    s_kernel_size=3,
+    s_sigma=1,
+):
+    b, c, h, w = shape = t_guidance.shape
+
+    t_softmax, s_softmax = (
+        torch.softmax(
+            gaussian_blur_2d(torch.abs(t), ks, sig).reshape(b * c, h * w),
+            dim=1,
+        ).reshape(*shape)
+        for t, ks, sig in (
+            (t_guidance, t_kernel_size, t_sigma),
+            (s_guidance, s_kernel_size, s_sigma),
+        )
+    )
+    guidance_stacked = torch.stack((t_guidance, s_guidance), dim=0)
+    argeps = torch.argmax(
+        torch.stack((t_softmax, s_softmax), dim=0), dim=0, keepdim=True
+    )
+    return torch.gather(guidance_stacked, dim=0, index=argeps).squeeze(0)
+
+
+class OCSLatentFormat:
+    def __init__(self, device, latent_format):
+        if latent_format.latent_rgb_factors is None:
+            self.rgb_factors = None
+            return
+        self.rgb_factors = torch.tensor(
+            latent_format.latent_rgb_factors, device=device, dtype=torch.float
+        ).t()
+        # Thanks for Joviax for the help implementing this!
+        self.rgb_factors_inv = torch.linalg.pinv(self.rgb_factors)
+        bias = getattr(latent_format, "latent_rgb_factors_bias", None)
+        self.rgb_factors_bias = (
+            None
+            if bias is None
+            else torch.tensor(bias, device=device, dtype=torch.float)
+        )
+
+    def latent_to_rgb(self, latent: torch.Tensor) -> torch.Tensor:
+        # NCHW -> NHWC
+        if self.latent_factors is None:
+            raise ValueError("No RGB factors for latent type!")
+        return torch.nn.functional.linear(
+            latent.movedim(1, -1), self.rgb_factors, bias=self.rgb_factors_bias
+        )
+
+    def rgb_to_latent(self, img: torch.Tensor) -> torch.Tensor:
+        # NHWC
+        if self.latent_factors is None:
+            raise ValueError("No RGB factors for latent type!")
+        if self.rgb_factors_bias is not None:
+            img = img - self.rgb_factors_bias
+        return torch.nn.functional.linear(img, self.rgb_factors_inv)

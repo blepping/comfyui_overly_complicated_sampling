@@ -3,7 +3,7 @@ from tqdm.auto import trange
 
 
 from .filtering import FILTER_HANDLERS, FilterRefs
-from .model import ModelCallCache
+from .model import OCSModel
 from .noise import NoiseSamplerCache
 from .substep_sampling import SamplerState
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
@@ -44,6 +44,7 @@ def composable_sampler(
             return torch.randn_like(x)
 
     restart_params = copts.get("restart", {})
+    restart_enabled = restart_params.get("enabled", True)
     restart_custom_noise = copts.get("restart_custom_noise")
     if isinstance(restart_custom_noise, str):
         restart_custom_noise = copts.get(f"restart_custom_noise_{restart_custom_noise}")
@@ -54,7 +55,7 @@ def composable_sampler(
     )
 
     ss = SamplerState(
-        ModelCallCache(
+        OCSModel(
             model,
             x,
             x.new_ones((x.shape[0],)),
@@ -78,12 +79,14 @@ def composable_sampler(
     nsc = NoiseSamplerCache(
         x,
         extra_args.get("seed", 42),
-        sigmas[-1],
-        sigmas[0],
+        sigmas[sigmas > 0].min(),
+        sigmas.max(),
         **copts.get("noise", {}),
     )
     ss.noise = nsc
-    sigma_chunks = tuple(restart.split_sigmas(sigmas))
+    sigma_chunks = (
+        tuple(restart.split_sigmas(sigmas)) if restart_enabled else ((0.0, sigmas),)
+    )
     step_count = sum(len(chunk) - 1 for _noise, chunk in sigma_chunks)
     ss.total_steps = step_count
     step = 0
@@ -114,10 +117,6 @@ def composable_sampler(
                 if idx > 0:
                     ss.update(idx, step=step, substep=0)
                     nsc.update_x(x)
-                # print(
-                #     f"STEP {step + 1:>3}: {ss.sigma.item():.03} -> {ss.sigma_next.item():.03} || up={ss.sigma_up.item():.03}, down={ss.sigma_down.item():.03}"
-                # )
-                ss.model.reset_cache()
                 nsc.update_x(x)
                 merge_sampler = find_merge_sampler(merge_samplers, ss)
                 if merge_sampler is None:
