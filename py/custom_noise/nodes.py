@@ -1635,7 +1635,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
                 **kwargs: dict,
             ) -> torch.Tensor:
                 nonlocal ref_latent, filter_refs, immiscible_counter, noise_prev
-                if not isigma_end <= s.max() <= isigma_start:
+                if not isigma_end <= s.max() <= isigma_start or icfg.size == 0:
                     return override_noise_sampler(s, sn, *args, **kwargs)
                 if icfg.filter_noise or icfg.filter_result:
                     curr_refs = filtering.FilterRefs(

@@ -13,6 +13,7 @@ from .types import (
     ExpKV,
     ExpMethodAp,
     ExpOp,
+    ExpReturn,
     ExpStatements,
     ExpSym,
     ExpTuple,
@@ -65,7 +66,10 @@ class Expression:
             tqdm.write(f"* OCS: EVAL: {self.expr}")
         if not isinstance(self.expr, ExpBase):
             return self.expr
-        return self.expr.eval(handlers, *args, **kwargs)
+        try:
+            return self.expr.eval(handlers, *args, **kwargs)
+        except ExpReturn as expret:
+            return expret.args[0]
 
     def __len__(self):
         return len(self.expr)

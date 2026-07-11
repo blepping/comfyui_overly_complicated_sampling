@@ -8,7 +8,7 @@ import torch
 from . import expression as expr
 from . import latent, unsafe_expression_whitelists
 from .external import MODULES as EXT
-from .latent import OCSTAESD, ImageBatch, normalize_to_scale
+from .latent import OCSTAESD, ImageBatch, flip_tensor_range, normalize_to_scale
 from .utils import quantile_normalize, resolve_value, scale_noise
 
 ALLOW_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS") is not None
@@ -305,6 +305,102 @@ class NewFullHandler(NormHandler):
     def handle(self, obj, getter):
         tensor, shape, value = self.safe_get_all(obj, getter)
         return tensor.new_full(shape, value)
+
+
+class InvertRangeHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        if dim < 0:
+            dim += tensor.ndim
+        if dim < 0 or dim >= tensor.ndim:
+            raise ValueError(
+                f"Dimension out of range, wanted {dim}, tensor has {tensor.ndim} dimension(s)"
+            )
+        return flip_tensor_range(tensor, dim=dim)
+
+
+class MinHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        return tensor.min(dim=dim, keepdim=True).values
+
+
+class MaxHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        return tensor.max(dim=dim, keepdim=True).values
+
+
+class CumSumHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        return tensor.cumsum(dim=dim)
+
+
+class MinimumHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor1"),
+        expr.Arg.tensor("tensor2"),
+    )
+
+    def handle(self, obj, getter):
+        tensor1, tensor2 = self.safe_get_all(obj, getter)
+        return tensor1.minimum(tensor2)
+
+
+class MaximumHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor1"),
+        expr.Arg.tensor("tensor2"),
+    )
+
+    def handle(self, obj, getter):
+        tensor1, tensor2 = self.safe_get_all(obj, getter)
+        return tensor1.maximum(tensor2)
+
+
+class MoveDimHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("from_dim"),
+        expr.Arg.integer("to_dim", -1),
+    )
+
+    def handle(self, obj, getter):
+        tensor, from_dim, to_dim = self.safe_get_all(obj, getter)
+        return tensor.movedim(from_dim, to_dim)
+
+
+class FlattenHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("start_dim", 0),
+        expr.Arg.integer("end_dim", -1),
+    )
+
+    def handle(self, obj, getter):
+        tensor, start_dim, end_dim = self.safe_get_all(obj, getter)
+        return tensor.flatten(start_dim=start_dim, end_dim=end_dim)
 
 
 class BlendHandler(NormHandler):
@@ -699,10 +795,18 @@ TENSOR_OP_HANDLERS = {
     "t_clone": CloneHandler(),
     "t_newfull": NewFullHandler(),
     "t_copysign": CopySignHandler(),
+    "t_flatten": FlattenHandler(),
+    "t_movedim": MoveDimHandler(),
+    "t_min": MinHandler(),
+    "t_max": MaxHandler(),
+    "t_minimum": MinimumHandler(),
+    "t_maximum": MaximumHandler(),
+    "t_cumsum": CumSumHandler(),
     "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),
     "t_shape": ShapeHandler(),
+    "t_invert_range": InvertRangeHandler(),
     "t_gaussianblur2d": GaussianBlur2DHandler(),
     "t_rgb_latent": RGBLatentHandler(),
     "t_snf_guidance": SNFGuidanceHandler(),

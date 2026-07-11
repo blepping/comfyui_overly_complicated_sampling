@@ -62,10 +62,12 @@ class BaseHandler:
     def __call__(self, obj, *, getter):
         try:
             val = self.handle(obj, getter)
-            return self.validate_output(obj, val)
+        except ExpReturn:
+            raise
         except Exception as exc:
             tb = traceback.format_exc()
             raise HandlerError(f'Error evaluating "{obj.name}": {exc!s}\n{tb}') from exc
+        return self.validate_output(obj, val)
 
     def safe_get(self, key, obj, getter=None, *, default=Empty):
         str_key = isinstance(key, str)

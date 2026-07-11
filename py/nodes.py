@@ -800,7 +800,8 @@ class ExpressionFilteredLatentOperation:
         **kwargs: dict,
     ) -> torch.Tensor:
         refs = FilterRefs(
-            kvs={
+            kvs=kwargs
+            | {
                 "sigma": sigma.clone() if isinstance(sigma, torch.Tensor) else sigma,
                 "sigma_float": sigma.max().item()
                 if isinstance(sigma, torch.Tensor)
