@@ -1,18 +1,15 @@
 import os
-
-import torch
-import numpy as np
-import PIL.Image as PILImage
 from functools import partial
 
+import numpy as np
+import PIL.Image as PILImage
+import torch
+
 from . import expression as expr
-from . import latent
-from . import unsafe_expression_whitelists
-
+from . import latent, unsafe_expression_whitelists
 from .external import MODULES as EXT
-from .utils import scale_noise, resolve_value, quantile_normalize
-from .latent import OCSTAESD, ImageBatch, normalize_to_scale
-
+from .latent import OCSTAESD, ImageBatch, flip_tensor_range, normalize_to_scale
+from .utils import quantile_normalize, resolve_value, scale_noise
 
 ALLOW_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS") is not None
 ALLOW_ALL_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_ALL_UNSAFE") is not None
@@ -107,6 +104,14 @@ class ClampHandler(NormHandler):
         return torch.clamp(tensor, min=tmin, max=tmax)
 
 
+class AbsHandler(NormHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def handle(self, obj, getter):
+        (tensor,) = self.safe_get_all(obj, getter)
+        return tensor.abs()
+
+
 class StackHandler(NormHandler):
     input_validators = (
         expr.Arg.sequence("tensors", item_validator=expr.ValidateArg.validate_tensor),
@@ -135,17 +140,52 @@ class ReshapeHandler(NormHandler):
         return torch.reshape(tensor.clone(), shape)
 
 
+class SplitHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("chunk_size"),
+        expr.Arg.integer("dim"),
+        expr.Arg.boolean("pad_last", False),
+    )
+
+    def handle(self, obj, getter):
+        tensor, chunk_size, dim, pad_last = self.safe_get_all(obj, getter)
+        chunks = torch.split(tensor, chunk_size, dim=dim)
+        if not chunks or not pad_last or chunks[-1].shape == chunks[0].shape:
+            return chunks
+        dsize = chunks[0].shape[dim]
+        replacement_chunk = tensor.new_zeros(chunks[0].shape)
+        replacement_chunk[
+            tuple(
+                slice(None, dsize if d == dim else None) for d in replacement_chunk.ndim
+            )
+        ] = chunks[-1]
+        return (*chunks[:-1], replacement_chunk)
+
+
+class TrimHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numscalar_sequence("shape"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, shape = self.safe_get_all(obj, getter)
+        return tensor[tuple(slice(0, dsize) for dsize in shape)]
+
+
 class IndexedCopyHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor_dest"),
         expr.Arg.tensor("tensor_src"),
         expr.Arg.tensor_slice("slice"),
+        expr.Arg.boolean("slice_src", default=True),
     )
 
     def handle(self, obj, getter):
-        tensor1, tensor2, tensor_slice = self.safe_get_all(obj, getter)
+        tensor1, tensor2, tensor_slice, slice_src = self.safe_get_all(obj, getter)
         result = tensor1.clone()
-        result[tensor_slice] = tensor2[tensor_slice]
+        result[tensor_slice] = tensor2[tensor_slice] if slice_src else tensor2
         return result
 
 
@@ -167,22 +207,24 @@ class NewLikeHandler(NormHandler):
 class MeanHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
-        expr.Arg.numscalar_sequence("dim", (-3, -2, -1)),
+        expr.Arg.numscalar_sequence_or_single("dim", (-3, -2, -1)),
     )
 
     def handle(self, obj, getter):
         tensor, dim = self.safe_get_all(obj, getter)
+        dim = dim if isinstance(dim, tuple) else (dim,)
         return tensor.mean(keepdim=True, dim=dim)
 
 
 class StdHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
-        expr.Arg.numscalar_sequence("dim", (-3, -2, -1)),
+        expr.Arg.numscalar_sequence_or_single("dim", (-3, -2, -1)),
     )
 
     def handle(self, obj, getter):
         tensor, dim = self.safe_get_all(obj, getter)
+        dim = dim if isinstance(dim, tuple) else (dim,)
         return tensor.std(keepdim=True, dim=dim)
 
 
@@ -190,17 +232,7 @@ class RollHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numeric_scalar("amount", 0.5),
-        expr.Arg.one_of(
-            "dim",
-            (
-                expr.ValidateArg.validate_integer,
-                partial(
-                    expr.ValidateArg.validate_sequence,
-                    item_validator=expr.ValidateArg.validate_integer,
-                ),
-            ),
-            default=-2,
-        ),
+        expr.Arg.numscalar_sequence_or_single("dim", -2),
     )
 
     def handle(self, obj, getter):
@@ -275,20 +307,135 @@ class NewFullHandler(NormHandler):
         return tensor.new_full(shape, value)
 
 
+class InvertRangeHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        if dim < 0:
+            dim += tensor.ndim
+        if dim < 0 or dim >= tensor.ndim:
+            raise ValueError(
+                f"Dimension out of range, wanted {dim}, tensor has {tensor.ndim} dimension(s)"
+            )
+        return flip_tensor_range(tensor, dim=dim)
+
+
+class MinHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        return tensor.min(dim=dim, keepdim=True).values
+
+
+class MaxHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        return tensor.max(dim=dim, keepdim=True).values
+
+
+class CumSumHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("dim"),
+    )
+
+    def handle(self, obj, getter):
+        tensor, dim = self.safe_get_all(obj, getter)
+        return tensor.cumsum(dim=dim)
+
+
+class MinimumHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor1"),
+        expr.Arg.tensor("tensor2"),
+    )
+
+    def handle(self, obj, getter):
+        tensor1, tensor2 = self.safe_get_all(obj, getter)
+        return tensor1.minimum(tensor2)
+
+
+class MaximumHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor1"),
+        expr.Arg.tensor("tensor2"),
+    )
+
+    def handle(self, obj, getter):
+        tensor1, tensor2 = self.safe_get_all(obj, getter)
+        return tensor1.maximum(tensor2)
+
+
+class MoveDimHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("from_dim"),
+        expr.Arg.integer("to_dim", -1),
+    )
+
+    def handle(self, obj, getter):
+        tensor, from_dim, to_dim = self.safe_get_all(obj, getter)
+        return tensor.movedim(from_dim, to_dim)
+
+
+class FlattenHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.integer("start_dim", 0),
+        expr.Arg.integer("end_dim", -1),
+    )
+
+    def handle(self, obj, getter):
+        tensor, start_dim, end_dim = self.safe_get_all(obj, getter)
+        return tensor.flatten(start_dim=start_dim, end_dim=end_dim)
+
+
 class BlendHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor1"),
         expr.Arg.tensor("tensor2"),
         expr.Arg.numeric("scale", 0.5),
-        expr.Arg.string("mode", "lerp"),
+        expr.Arg.one_of(
+            "mode",
+            (
+                expr.ValidateArg.validate_string,
+                expr.ValidateArg.validate_dict,
+            ),
+        ),
+        expr.Arg.one_of(
+            "blend_kwargs",
+            (
+                expr.ValidateArg.validate_none,
+                expr.ValidateArg.validate_dict,
+            ),
+            default=None,
+        ),
     )
 
     def handle(self, obj, getter):
-        t1, t2, scale, mode = self.safe_get_all(obj, getter)
+        t1, t2, scale, mode, blend_kwargs = self.safe_get_all(obj, getter)
         blend_handler = BLENDING_MODES.get(mode)
         if not blend_handler:
             raise KeyError(f"Unknown blend mode {mode!r}")
-        return blend_handler(t1, t2, scale)
+        return blend_handler(
+            t1,
+            t2,
+            scale,
+            **({} if blend_kwargs is None else blend_kwargs),
+        )
 
 
 class ContrastAdaptiveSharpeningHandler(NormHandler):
@@ -633,8 +780,11 @@ TENSOR_OP_HANDLERS = {
     "t_normalize_to_scale": NormToScaleHandler(),
     "t_reshape": ReshapeHandler(),
     "t_clamp": ClampHandler(),
+    "t_abs": AbsHandler(),
     "t_cat": CatHandler(),
     "t_stack": StackHandler(),
+    "t_split": SplitHandler(),
+    "t_trim": TrimHandler(),
     "t_indexed_copy": IndexedCopyHandler(),
     "t_new_like": NewLikeHandler(),
     "t_mean": MeanHandler(),
@@ -645,16 +795,29 @@ TENSOR_OP_HANDLERS = {
     "t_clone": CloneHandler(),
     "t_newfull": NewFullHandler(),
     "t_copysign": CopySignHandler(),
+    "t_flatten": FlattenHandler(),
+    "t_movedim": MoveDimHandler(),
+    "t_min": MinHandler(),
+    "t_max": MaxHandler(),
+    "t_minimum": MinimumHandler(),
+    "t_maximum": MaximumHandler(),
+    "t_cumsum": CumSumHandler(),
     "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
     "t_scale": ScaleHandler(),
     "t_noise": NoiseHandler(),
     "t_shape": ShapeHandler(),
+    "t_invert_range": InvertRangeHandler(),
     "t_gaussianblur2d": GaussianBlur2DHandler(),
     "t_rgb_latent": RGBLatentHandler(),
     "t_snf_guidance": SNFGuidanceHandler(),
     "t_taesd_decode": TAESDDecodeHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),
+}
+
+TENSOR_OP_HANDLERS |= {
+    f"Tensor::{k[2:] if k.startswith('t_') else k}": v
+    for k, v in TENSOR_OP_HANDLERS.items()
 }
 
 IMAGE_OP_HANDLERS = {

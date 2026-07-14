@@ -1,8 +1,12 @@
-from . import types, expression, handler, util, validation
-
+from . import expression, types, util
 from .expression import Expression
-from .validation import Arg, ValidateArg
-from .handler import BASIC_HANDLERS, BaseHandler, HandlerContext
+
+try:
+    from . import handler, validation
+    from .handler import BASIC_HANDLERS, BaseHandler, HandlerContext
+    from .validation import Arg, ValidateArg
+except (ImportError, ModuleNotFoundError):
+    pass
 
 __all__ = (
     "Arg",

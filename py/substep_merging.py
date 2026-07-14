@@ -5,8 +5,7 @@ import tqdm
 
 from . import expression as expr
 from . import utils
-
-from .filtering import make_filter, FilterRefs, FILTER_HANDLERS
+from .filtering import FILTER_HANDLERS, FilterRefs, make_filter
 from .noise import ImmiscibleNoise
 from .restart import Restart
 from .step_samplers import STEP_SAMPLERS
@@ -451,6 +450,7 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
             s_noise=restart.get("s_noise", 1.0),
             custom_noise=restart_custom_noise,
             immiscible=restart.get("immiscible", False),
+            is_flow=ss.model.is_rectified_flow,
         )
 
     def make_schedule(self, ss):
@@ -505,10 +505,13 @@ class OvershootMergeSubstepsSampler(MergeSubstepsSampler):
                 if subss.idx >= max_idx:
                     break
         if last_down is not None and last_down < ss.sigma_next:
-            restart_ns = self.restart.get_noise_sampler(ss.noise)
-            x += ss.noise.scale_noise(
-                restart_ns(last_down, ss.sigma_next, refs=ss.refs),
-                self.restart.get_noise_scale(last_down, ss.sigma_next),
+            x = self.restart.add_noise(
+                x,
+                sigma_from=last_down.item(),
+                sigma_to=ss.sigma_next.item(),
+                nsc=nsc,
+                refs=ss.refs,
+                in_place=True,
             )
         pbar.update(0)
         return x
@@ -653,11 +656,13 @@ class PingpongMergeSubstepsSampler(MergeSubstepsSampler):
             sigma_next,
             immiscible=fallback(self.immiscible, ss.noise.immiscible),
         )
-        noise_refs = ss.refs | FilterRefs({
-            "orig_x": orig_x,
-            "x": x,
-            "denoised": synth_denoised,
-        })
+        noise_refs = ss.refs | FilterRefs(
+            {
+                "orig_x": orig_x,
+                "x": x,
+                "denoised": synth_denoised,
+            }
+        )
         noise = (
             noise_sampler(sigma, sigma_next, refs=noise_refs) * self.pingpong_s_noise
         )

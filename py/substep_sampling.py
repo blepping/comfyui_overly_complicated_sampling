@@ -1,10 +1,18 @@
-import torch
+from typing import NamedTuple
 
+import torch
 from comfy.k_diffusion.sampling import get_ancestral_step
 
 from .filtering import FilterRefs
 from .model import History
 from .utils import fallback
+
+
+class AncestralRatios(NamedTuple):
+    alpha_t: torch.Tensor
+    alpha_s: torch.Tensor
+    sigma_up: torch.Tensor
+    sigma_down: torch.Tensor
 
 
 class Items:
@@ -141,6 +149,10 @@ class SamplerState:
         self.substep = 0
         self.total_steps = len(sigmas) - 1
         self.cfg_scale_override = cfg_scale_override
+        self.is_flow = self.model.is_rectified_flow
+        self.offset_sigma = (
+            model.model_sampling.percent_to_sigma(1e-04) if self.is_flow else None
+        )
         self.update(idx)  # Sets idx, sigma_prev, sigma, sigma_down, refs
 
     @property
@@ -171,6 +183,23 @@ class SamplerState:
     def d(self):
         return self.hcur.d
 
+    # These two functions referenced from ComfyUI.
+    def sigma_to_half_log_snr(
+        self, *, sigma: torch.Tensor | None = None, idx: int | None = None
+    ) -> torch.Tensor:
+        if sigma is None and idx is None:
+            sigma = self.sigma
+        else:
+            sigma = sigma if sigma is not None else self.sigmas[idx]
+        if not self.is_flow:
+            return sigma.log().neg_()
+        if sigma.max() >= 1.0:
+            sigma = sigma * 0.0 + self.offset_sigma
+        return sigma.logit().neg_()
+
+    def half_log_snr_to_sigma(self, half_log_snr: torch.Tensor) -> torch.Tensor:
+        return (torch.sigmoid if self.is_flow else torch.exp)(half_log_snr.neg())
+
     def update(self, idx=None, step=None, substep=None):
         idx = self.idx if idx is None else idx
         self.idx = idx
@@ -184,6 +213,59 @@ class SamplerState:
         if substep is not None:
             self.substep = substep
         self.refs = FilterRefs.from_ss(self)
+
+    def get_ancestral_step_ext(
+        self,
+        *,
+        sigma: torch.Tensor | None = None,
+        sigma_next: torch.Tensor | None = None,
+        eta: float = 1.0,
+        retry_increment: int = 0,
+    ):
+        sigma = fallback(sigma, self.sigma)
+        sigma_next = fallback(sigma_next, self.sigma_next)
+        sigma_empty = sigma_next * 0.0
+
+        def get_noeta_ratios():
+            return AncestralRatios(
+                alpha_t=sigma_empty + 1.0,
+                alpha_s=sigma_empty + 1.0,
+                sigma_up=sigma_empty.clone(),
+                sigma_down=sigma_next.clone(),
+            )
+
+        if eta <= 0 or sigma_next.max().item() <= 1e-08:
+            return get_noeta_ratios()
+        orig_dtype = sigma.dtype
+        sigma = sigma.to(dtype=torch.float64)
+        sigma_next = sigma_next.to(dtype=torch.float64)
+        alpha_s = sigma * self.sigma_to_half_log_snr(sigma=sigma).exp()
+        alpha_t = sigma_next * self.sigma_to_half_log_snr(sigma=sigma_next).exp()
+        adj_sigma = sigma / alpha_s
+        adj_sigma_next = sigma_next / alpha_t
+        sd = su = None
+        while eta > 0:
+            sd, su = (
+                v if isinstance(v, torch.Tensor) else sigma.new_full((1,), v)
+                for v in get_ancestral_step(adj_sigma, adj_sigma_next, eta=eta)
+            )
+            if sd > 0 and su > 0:
+                break
+            else:
+                sd = su = None
+            if retry_increment <= 0:
+                break
+            # print(f"\nETA {eta} failed, retrying with {eta - retry_increment}")
+            eta -= retry_increment
+        if sd is None or su is None:
+            return get_noeta_ratios()
+        sd = alpha_t * sd
+        return AncestralRatios(
+            alpha_t=alpha_t.to(dtype=orig_dtype),
+            alpha_s=alpha_s.to(dtype=orig_dtype),
+            sigma_up=su.to(dtype=orig_dtype),
+            sigma_down=sd.to(dtype=orig_dtype),
+        )
 
     def get_ancestral_step(
         self, eta=1.0, sigma=None, sigma_next=None, retry_increment=0
@@ -265,13 +347,15 @@ class SamplerState:
             preview = (hi.x - hi.denoised) * 0.1 + hi.denoised
         else:
             preview = hi.denoised
-        return self.callback_({
-            "x": hi.x,
-            "i": self.step,
-            "sigma": hi.sigma,
-            "sigma_hat": hi.sigma,
-            "denoised": preview,
-        })
+        return self.callback_(
+            {
+                "x": hi.x,
+                "i": self.step,
+                "sigma": hi.sigma,
+                "sigma_hat": hi.sigma,
+                "denoised": preview,
+            }
+        )
 
     def reset(self):
         self.hist.reset()

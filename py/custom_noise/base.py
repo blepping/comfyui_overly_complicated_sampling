@@ -1,11 +1,11 @@
 import abc
+from typing import Any, Callable
+
 import torch
 
-from typing import Callable, Any
-
 from ..external import IntegratedNode
+from ..nodes import NOISE_INPUT_TYPES_HINT, WILDCARD_NOISE
 from ..noise import scale_noise
-from ..nodes import WILDCARD_NOISE, NOISE_INPUT_TYPES_HINT
 
 
 class CustomNoiseItemBase(abc.ABC):

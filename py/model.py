@@ -169,8 +169,9 @@ class OCSModel:
         self.extra_args = extra_args
         self.cfg1_uncond_optimization = cfg1_uncond_optimization
         self.cfg_scale_override = cfg_scale_override
+        self.model_sampling = model.inner_model.inner_model.model_sampling
         self.is_rectified_flow = isinstance(
-            model.inner_model.inner_model.model_sampling, comfy.model_sampling.CONST
+            self.model_sampling, comfy.model_sampling.CONST
         )
         self.latent_format = OCSLatentFormat(
             x.device, model.inner_model.inner_model.latent_format
@@ -212,9 +213,9 @@ class OCSModel:
     ) -> torch.Tensor:
         return self.model(x, sigma * self.s_in, **self.extra_args | kwargs)
 
-    @property
-    def model_sampling(self):
-        return self.model.inner_model.inner_model.model_sampling
+    # @property
+    # def model_sampling(self):
+    #     return self.model.inner_model.inner_model.model_sampling
 
     @property
     def inner_cfg_scale(self) -> None | int | float:

@@ -2,6 +2,8 @@ class Empty:
     def __bool__(self):
         return False
 
+class ExpReturn(Exception):
+    pass
 
 class ExpBase:
     def __bool__(self):
@@ -80,8 +82,6 @@ class ExpDict(dict, ExpBase):
     def clone(self):
         return self.__class__(v.clone() if isinstance(ExpBase) else v for v in self)
 
-    def pop(self, *args, **kwargs):
-        raise NotImplementedError
 
     def get_eval(self, k, handlers, *args, default=Empty, **kwargs):
         val = super().get(k, default)
@@ -106,12 +106,17 @@ class ExpDict(dict, ExpBase):
             for k, v in self.items()
         }
 
-    popitem = pop
-    update = pop
-    clear = pop
-    __delitem__ = pop
-    __setitem__ = pop
-    __ior__ = pop
+    # Can't remember if there was a compelling reason ExpDict can't be mutable but
+    # it breaks deep copy stuff.
+    #
+    # def pop(self, *args, **kwargs):
+    #     raise NotImplementedError
+    # popitem = pop
+    # update = pop
+    # clear = pop
+    # __delitem__ = pop
+    # __setitem__ = pop
+    # __ior__ = pop
 
 
 class ExpStatements(ExpBase):
@@ -135,22 +140,76 @@ class ExpStatements(ExpBase):
 
 
 class ExprGetter:
-    def __init__(self, obj, ctx, *args, **kwargs):
+    def __init__(self, obj, ctx, args, kwargs, *, prepend_args=()):
         self.obj = obj
         self.ctx = ctx
         self.args = args
+        self.prepend_args = prepend_args
         self.kwargs = kwargs
 
     def __call__(self, k, *, default=Empty):
         obj = self.obj
-        result = (
-            obj.kwargs.get_eval(k, self.ctx, *self.args, default=default, **self.kwargs)
-            if isinstance(k, str)
-            else obj.args.get_eval(k, self.ctx, *self.args, **self.kwargs)
-        )
+        if isinstance(k, str):
+            result = obj.kwargs.get_eval(
+                k, self.ctx, *self.args, default=default, **self.kwargs
+            )
+        elif isinstance(k, int):
+            pa = self.prepend_args
+            pa_len = len(pa)
+            result = (
+                pa[k]
+                if k < pa_len
+                else obj.args.get_eval(k, self.ctx, *self.args, **self.kwargs)
+            )
         if result is Empty:
             raise KeyError(f"Unknown key {k!r}")
         return result
+
+
+class ExpMethodAp(ExpBase):
+    __slots__ = ("object_expression", "funap")
+
+    def __init__(self, object_expression, funap):
+        super().__init__()
+        self.object_expression = object_expression
+        self.funap = funap
+
+    def eval(self, handlers, *args, **kwargs):
+        object_value = self.object_expression.eval(handlers, *args, **kwargs)
+        type_name = type(object_value).__name__
+        handler_key = f"{type_name}::{self.funap.name}"
+        handler = handlers.get_handler(handler_key)
+        if handler is Empty:
+            raise KeyError(f"No handler for method call op: {handler_key!r}")
+        return handler(
+            self,
+            getter=ExprGetter(
+                self.funap, handlers, args, kwargs, prepend_args=(object_value,)
+            ),
+            **kwargs,
+        )
+
+    def clone(self):
+        return self.__class__(
+            object_expression=self.object_expression.clone(),
+            funap=self.funap.clone(),
+        )
+    __copy__ = clone
+
+    def __getattr__(self, k):
+        if k == "name":
+            return f"method::{self.funap.name}"
+        if k == "args":
+            return self.funap.args
+        if k == "kwargs":
+            return self.funap.kwargs
+        # This doesn't play well with deep copy.
+        # if hasattr(self.funap, k):
+        #     return getattr(self.funap, k)
+        raise AttributeError(f"Can't get attribute {k}")
+
+    def __repr__(self):
+        return f"<METHAP:{self.object_expression}::{self.funap}>"
 
 
 class ExpFunAp(ExpBase):
@@ -165,9 +224,7 @@ class ExpFunAp(ExpBase):
         handler = handlers.get_handler(self.name)
         if handler is Empty:
             raise KeyError(f"No handler for op: {self.name!r}")
-        return handler(
-            self, getter=ExprGetter(self, handlers, *args, **kwargs), **kwargs
-        )
+        return handler(self, getter=ExprGetter(self, handlers, args, kwargs), **kwargs)
 
     def clone(self):
         return self.__class__(self.name, self.args.clone(), self.kwargs.clone())
@@ -209,5 +266,6 @@ __all__ = (
     "ExpKV",
     "ExpDict",
     "ExpFunAp",
+    "ExpMethodAp",
     "ExpBoundFunAp",
 )

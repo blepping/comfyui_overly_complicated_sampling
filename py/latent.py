@@ -1,13 +1,11 @@
+import folder_paths
+import latent_preview
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-import folder_paths
-import latent_preview
-
+from comfy import latent_formats
 from comfy.taesd.taesd import TAESD
 from comfy.utils import bislerp
-from comfy import latent_formats
 
 from .external import MODULES as EXT
 
@@ -123,6 +121,45 @@ def contrast_adaptive_sharpening(  # noqa: PLR0914
     if normalize:
         output = output.add_(orig_mean).mul_(luminance)
     return output.reshape(*orig_shape)
+
+
+def flip_tensor_range(
+    x: torch.Tensor,
+    *,
+    min_neg: torch.Tensor | None = None,
+    max_pos: torch.Tensor | None = None,
+    return_ranges: bool = False,
+    dim: int = -1,
+    eps: float | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if eps is None:
+        eps = torch.finfo(x.dtype).eps * 1.25
+    # 1. Use the provided maximum positive values, or calculate them dynamically
+    if max_pos is None:
+        max_pos = (
+            torch.clamp_min(x, 0.0).max(dim=dim, keepdim=True).values.clamp_min_(eps)
+        )
+
+    # 2. Use the provided minimum negative values, or calculate them dynamically
+    if min_neg is None:
+        min_neg = (
+            torch.clamp_max(x, 0.0).min(dim=dim, keepdim=True).values.clamp_max_(-eps)
+        )
+
+    # 3. Separate positive and negative elements
+    is_pos = x >= 0
+
+    # 4. Flip positive side: [0, max_pos] -> [eps, max_pos + eps]
+    x_pos = x.clamp_min(eps)
+    flipped_pos = (max_pos + eps) - x_pos
+
+    # 5. Flip negative side: [min_neg, 0] -> [min_neg - eps, -eps]
+    x_neg = x.clamp_max(-eps)
+    flipped_neg = (min_neg - eps) - x_neg
+
+    # 6. Recombine the domains
+    result = torch.where(is_pos, flipped_pos, flipped_neg)
+    return (result, max_pos, min_neg) if return_ranges else result
 
 
 class ImageBatch(tuple):

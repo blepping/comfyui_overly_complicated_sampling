@@ -2,8 +2,8 @@ import contextlib
 import functools
 
 from ..latent import ImageBatch
-from .util import torch
 from .types import Empty
+from .util import torch
 
 
 class Arg:
@@ -51,6 +51,17 @@ class Arg:
     def numscalar_sequence(cls, name, default=Empty):
         return cls(
             name, default=default, validator=ValidateArg.validate_numscalar_sequence
+        )
+
+    @classmethod
+    def numscalar_sequence_or_single(cls, name, default=Empty):
+        return cls.one_of(
+            name,
+            (
+                ValidateArg.validate_numscalar_sequence,
+                ValidateArg.validate_numeric_scalar,
+            ),
+            default=default,
         )
 
     @classmethod
@@ -234,6 +245,12 @@ class ValidateArg:
     def validate_string(cls, idx, val):
         if not isinstance(val, str):
             raise ValidateError(f"Expected string argument at {idx}, got {type(val)}")
+        return val
+
+    @classmethod
+    def validate_dict(cls, idx, val):
+        if not isinstance(val, dict):
+            raise ValidateError(f"Expected dict argument at {idx}, got {type(val)}")
         return val
 
     @classmethod

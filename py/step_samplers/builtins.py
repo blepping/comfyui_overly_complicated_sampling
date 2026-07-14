@@ -1,13 +1,14 @@
-import torch
-
 import comfy
+import torch
 from comfy.k_diffusion.sampling import get_ancestral_step
+from tqdm import tqdm
 
+from .. import filtering
 from .base import (
-    SingleStepSampler,
     DPMPPStepMixin,
     HistorySingleStepSampler,
     ReversibleSingleStepSampler,
+    SingleStepSampler,
     registry,
 )
 
@@ -524,6 +525,147 @@ class RESMultistepStep(HistorySingleStepSampler, DPMPPStepMixin):
         yield from self.result(result, sigma_up, sigma_down=sigma_down)
 
 
+# SEEDS-2 - Stochastic Explicit Exponential Derivative-free Solvers (VP Data Prediction) stage 2.
+# arXiv: https://arxiv.org/abs/2305.14267 (NeurIPS 2023)
+# Implementation referenced from ComfyUI.
+class Seeds2Step(SingleStepSampler, DPMPPStepMixin):
+    name = "seeds_2"
+    self_noise = 3
+    model_calls = 1
+    allow_alt_cfgpp = False
+    uses_alt_noise = True
+
+    def __init__(self, *args, r=0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.r = r
+        s2_options = self.options.get("seeds_2", {})
+        sigma_blend_mode = s2_options.get("sigma_blend_mode", "lerp").strip()
+        self.sigma_blend_function = (
+            filtering.BLENDING_MODES[sigma_blend_mode]
+            if sigma_blend_mode != "lerp"
+            else torch.lerp
+        )
+        denoised_blend_mode = s2_options.get("denoised_blend_mode", "lerp").strip()
+        self.denoised_blend_function = (
+            filtering.BLENDING_MODES[denoised_blend_mode]
+            if denoised_blend_mode != "lerp"
+            else torch.lerp
+        )
+        self.disable_stage2_eta = bool(s2_options.get("disable_stage2_eta", False))
+        stage2_stage1_noise_blend_mode = s2_options.get(
+            "stage2_stage1_noise_blend_mode", "lerp"
+        ).strip()
+        self.stage2_stage1_noise_blend_function = (
+            filtering.BLENDING_MODES[stage2_stage1_noise_blend_mode]
+            if stage2_stage1_noise_blend_mode != "lerp"
+            else torch.lerp
+        )
+        self.stage2_stage1_noise_ratio = s2_options.get(
+            "stage2_stage1_noise_ratio", 1.0
+        )
+        self.stage1_s_noise = s2_options.get("stage1_s_noise", 1.0)
+        self.stage2_s_noise = s2_options.get("stage2_s_noise", 1.0)
+        self.stage2_sigma_scale = s2_options.get("stage2_sigma_scale", 1.0)
+
+    def step(self, x: torch.Tensor):
+        ss = self.ss
+        sigma = ss.sigma.to(dtype=torch.float64)
+        sigma_next = ss.sigma_next.to(dtype=torch.float64)
+        denoised = ss.denoised
+
+        t_one = ss.sigma * 0 + 1.0
+
+        r, eta = self.r, self.get_dyn_eta()
+        fac = 1 / (2 * r)
+        lambda_s = ss.sigma_to_half_log_snr(sigma=sigma)
+        lambda_t = ss.sigma_to_half_log_snr(sigma=sigma_next)
+        h = lambda_t - lambda_s
+        h_eta = h * (eta + 1.0)
+        lambda_s_1 = self.sigma_blend_function(
+            lambda_s.unsqueeze(0), lambda_t.unsqueeze(0), r
+        ).squeeze(0)
+        sigma_s_1 = ss.half_log_snr_to_sigma(lambda_s_1)
+
+        alpha_s_1 = sigma_s_1 * lambda_s_1.exp()
+        alpha_t = sigma_next * lambda_t.exp()
+
+        s1_x_mult = sigma_s_1 / sigma * (-r * h * eta).exp()
+        s1_denoised_mult = alpha_s_1 * (-r * h_eta).expm1()
+        x_2 = (
+            s1_x_mult.to(dtype=x.dtype) * x
+            - s1_denoised_mult.to(dtype=x.dtype) * denoised
+        )
+        if eta != 0:
+            s1_noise_mult = (-2 * r * h * eta).expm1().neg().sqrt()
+            sde_noise1 = yield from self.result(
+                x_2 * 0,
+                s1_noise_mult.to(dtype=x.dtype),
+                sigma=ss.sigma,
+                sigma_next=sigma_s_1.to(dtype=x.dtype),
+                noise_sampler=self.alt_noise_sampler,
+                final=False,
+            )
+            x_2 += sde_noise1 * (sigma_s_1.to(dtype=x.dtype) * self.stage1_s_noise)
+
+        denoised_2 = self.call_model(
+            x_2, (sigma_s_1 * self.stage2_sigma_scale).to(dtype=x.dtype), call_index=1
+        ).denoised
+        denoised_d = self.denoised_blend_function(denoised, denoised_2, fac)
+
+        if self.disable_stage2_eta:
+            eta = 0.0
+            h_eta = h
+
+        s2_x_mult = sigma_next / sigma * (-h * eta).exp()
+        s2_denoised_mult = alpha_t * h_eta.neg().expm1()
+        x_curr = s2_x_mult.to(dtype=x.dtype) * x
+        x_curr -= s2_denoised_mult.to(dtype=x.dtype) * denoised_d
+
+        if eta == 0:
+            return (yield from self.result(x_curr))
+
+        s2_s1_nr = self.stage2_stage1_noise_ratio
+
+        segment_factor = ((r - 1.0) * h * eta).to(dtype=x.dtype)
+        s2_noise_mult = (segment_factor * 2.0).expm1().neg() ** 0.5
+        sde_noise2_raw = yield from self.result(
+            x_curr * 0,
+            t_one,
+            sigma=sigma_s_1.to(dtype=x.dtype),
+            sigma_next=ss.sigma_next,
+            final=False,
+        )
+        sde_noise2 = sde_noise2_raw * s2_noise_mult.to(dtype=x.dtype)
+
+        if s2_s1_nr != 1.0:
+            # print(
+            #     f"\n\nBLENDING: {s2_s1_nr:.4f}, {s1_noise_mult.item():.4f}, {s2_noise_mult.item():.4f}"
+            # )
+            sde_noise1 = self.stage2_stage1_noise_blend_function(
+                (
+                    yield from self.result(
+                        x_curr * 0,
+                        t_one,
+                        sigma=sigma_s_1.to(dtype=x.dtype),
+                        sigma_next=ss.sigma_next,
+                        final=False,
+                    )
+                )
+                * s1_noise_mult.to(dtype=x.dtype),
+                sde_noise1,
+                s2_s1_nr,
+            )
+
+        sde_noise1 *= segment_factor.exp()
+        sde_noise2 += sde_noise1
+        sde_noise2 *= ss.sigma_next * self.stage2_s_noise
+        x_curr += sde_noise2
+
+        yield from self.result(
+            x_curr, noise_scale=ss.sigma * 0, sigma_down=ss.sigma_next
+        )
+
+
 registry.add(
     DEISStep,
     DPMPP2MSDEStep,
@@ -538,4 +680,5 @@ registry.add(
     DPM2Step,
     DPMPP2SStep,
     RESMultistepStep,
+    Seeds2Step,
 )

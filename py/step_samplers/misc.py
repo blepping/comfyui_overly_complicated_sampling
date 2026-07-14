@@ -10,7 +10,7 @@ class PingPongStep(SingleStepSampler):
         super().__init__(*args, **kwargs)
         pingpong_options = self.options.pop("pingpong", {})
         self.pingpong_start_step = pingpong_options.get("start_step", 0)
-        self.pingpong_end_step = pingpong_options.get("end_step", 0)
+        self.pingpong_end_step = pingpong_options.get("end_step", 9999)
 
     def step(self, x):
         ss = self.ss

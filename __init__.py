@@ -11,5 +11,7 @@ NODE_CLASS_MAPPINGS = {
     "OCS SimpleRestartSchedule": nodes.SimpleRestartSchedule,
     "OCS ApplyFilterLatent": nodes.ApplyFilterLatent,
     "OCS ApplyFilterImage": nodes.ApplyFilterImage,
+    "OCS ExpressionFilteredLatentOperation": nodes.ExpressionFilteredLatentOperationNode,
+    "OCS ExpressionFilteredModelPatch": nodes.ExpressionFilteredModelPatchNode,
 } | custom_noise.NODE_CLASS_MAPPINGS
 __all__ = ["NODE_CLASS_MAPPINGS"]

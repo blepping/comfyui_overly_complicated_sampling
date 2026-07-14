@@ -2,12 +2,67 @@ import gc
 import math
 import random
 
+import numpy as np
 import scipy
 import torch
 from tqdm import tqdm
 
 from .filtering import Filter, make_filter
-from .utils import scale_noise, fallback
+from .utils import fallback, scale_noise
+
+try:
+    from .triton_lsa import (
+        assignments_to_indices,
+        batch_linear_assignment,
+        batch_linear_assignment_shuffled,
+    )
+
+    HAVE_TRITON = True
+except Exception:
+    HAVE_TRITON = False
+
+
+def linear_sum_assignment(
+    cost: torch.Tensor,
+    *,
+    maximize: bool = False,
+    use_triton: bool = False,
+    split_batch: int = 0,
+    **kwargs: dict,
+) -> tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor]:
+    if not use_triton or not HAVE_TRITON or not cost.is_cuda:
+        cost = cost.half().cpu()
+        return scipy.optimize.linear_sum_assignment(cost, maximize=maximize)
+    ndim = cost.ndim
+    orig_shape = cost.shape
+    if ndim == 2:
+        do_split = split_batch > 1 and all(
+            (sz / split_batch).is_integer() for sz in orig_shape
+        )
+        if do_split:
+            cost = cost.reshape(
+                split_batch, orig_shape[0] // split_batch, orig_shape[1] // split_batch
+            )
+        else:
+            cost = cost.unsqueeze(0)
+    tqdm.write(
+        f"TRITON LAP: maximize={maximize}, orig cost shape={orig_shape}, cost shape={cost.shape}, cost dtype={cost.dtype}",
+    )
+    if not cost.is_contiguous():
+        cost = cost.contiguous()
+    fun = (
+        batch_linear_assignment
+        if "generator" not in kwargs
+        else batch_linear_assignment_shuffled
+    )
+    assignments = fun(cost, maximize=maximize, **kwargs)
+    row_ind, col_ind = assignments_to_indices(assignments)
+    if ndim == 2:
+        row_ind = row_ind.reshape(-1, row_ind.shape[-1])
+        col_ind = col_ind.reshape(-1, col_ind.shape[-1])
+        # row_ind, col_ind = row_ind.squeeze(0), col_ind.squeeze(0)
+    tqdm.write(f"Ran LAP kernel: {assignments.shape}, {row_ind.shape}, {col_ind.shape}")
+    return row_ind, col_ind
 
 
 class ImmiscibleNoise(Filter):
@@ -19,6 +74,12 @@ class ImmiscibleNoise(Filter):
         "maximize": False,
         "distance_scale": 0.0,
         "distance_scale_ref": None,
+        "abs_mode": False,
+        "abs_distance_mode": False,
+        "use_triton": False,
+        # Only honored in Triton mode.
+        "split_batch": 0,
+        "generator": None,
     }
 
     def __call__(self, noise_sampler, x_ref, *, refs=None):
@@ -83,7 +144,11 @@ class ImmiscibleNoise(Filter):
         # "Immiscible Diffusion: Accelerating Diffusion Training with Noise Assignment" (2024) Li et al. arxiv.org/abs/2406.12303
         # Minimize latent-noise pairs over a batch
         batch = latent.shape[0]
+        out_latent = fallback(out_latent, latent)
         ref_latent = ref_latent.detach().clone()
+        if self.abs_mode:
+            ref_latent = ref_latent.abs()
+            latent = latent.abs()
         if self.distance_scale == 0:
             ref_latent_expanded = ref_latent.unsqueeze(1).expand(
                 -1, batch, *ref_latent.shape[1:]
@@ -92,30 +157,30 @@ class ImmiscibleNoise(Filter):
                 ref_latent.shape[0], *latent.shape
             )
             dist = (ref_latent_expanded - latent_expanded) ** 2
+            if self.abs_distance_mode:
+                dist = dist.abs_()
             del ref_latent_expanded, latent_expanded
-            dist = dist.mean(tuple(range(2, dist.dim())))
+            dist = dist.mean(tuple(range(2, dist.ndim)))
         else:
-            dist = torch.linalg.vector_norm(
-                fallback(self.distance_scale_ref, self.distance_scale)
-                * ref_latent.flatten(start_dim=1).unsqueeze(1)
-                - self.distance_scale * latent.flatten(start_dim=1).unsqueeze(0),
-                dim=2,
-            )
-        dist = dist.half()
+            distance_scale_ref = fallback(self.distance_scale_ref, self.distance_scale)
+            dist = distance_scale_ref * ref_latent.flatten(start_dim=1).unsqueeze(
+                1
+            ) - self.distance_scale * latent.flatten(start_dim=1).unsqueeze(0)
+            if self.abs_distance_mode:
+                dist = dist.abs_()
+            dist = torch.linalg.vector_norm(dist, dim=2)
         try:
-            assign_mat = scipy.optimize.linear_sum_assignment(
-                dist.cpu(), maximize=self.maximize
+            assign_mat = linear_sum_assignment(
+                dist,
+                maximize=self.maximize,
+                use_triton=self.use_triton,
+                split_batch=self.split_batch,
+                generator=self.generator,
             )
         except ValueError as exc:
             tqdm.write(f"OCS: Immiscible: Failed due to exception: {exc}")
-            return (
-                None
-                if return_idxs
-                else fallback(out_latent, latent)[: ref_latent.shape[0]]
-            )
-        return (
-            assign_mat if return_idxs else fallback(out_latent, latent)[assign_mat[1]]
-        )
+            return None if return_idxs else out_latent[: ref_latent.shape[0]]
+        return assign_mat if return_idxs else out_latent[assign_mat[1]]
 
     def immiscible_simple(
         self,

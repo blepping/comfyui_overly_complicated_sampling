@@ -1,17 +1,17 @@
+from __future__ import annotations
+
 import comfy
-import yaml
-
 import torch
-
+import yaml
 from tqdm import tqdm
 
 from .external import MODULES, IntegratedNode
+from .filtering import Filter, FilterRefs, make_filter
 from .restart import Restart
 from .sampling import composable_sampler
 from .step_samplers import STEP_SAMPLERS
 from .substep_merging import MERGE_SUBSTEPS_CLASSES
 from .substep_sampling import ParamGroup, StepSamplerChain, StepSamplerGroups
-from .filtering import make_filter
 
 try:
     from comfy_execution import validation as comfy_validation
@@ -27,15 +27,17 @@ except Exception as exc:
         f"** OCS: Warning, caught unexpected exception trying to detect ComfyUI union type support. Disabling. Exception: {exc}"
     )
 
-PARAM_INPUT_TYPES = frozenset((
-    "IMAGE",
-    "OCS_NOISE",
-    "SAMPLER",
-    "SIGMAS",
-    "SONAR_CUSTOM_NOISE",
-    "UPSCALE_MODEL",
-    "VAE",
-))
+PARAM_INPUT_TYPES = frozenset(
+    (
+        "IMAGE",
+        "OCS_NOISE",
+        "SAMPLER",
+        "SIGMAS",
+        "SONAR_CUSTOM_NOISE",
+        "UPSCALE_MODEL",
+        "VAE",
+    )
+)
 
 NOISE_INPUT_TYPES = frozenset(("SONAR_CUSTOM_NOISE", "OCS_NOISE"))
 
@@ -776,6 +778,330 @@ class ApplyFilterImage(ApplyFilterLatent):
             .to(image)
         )
         return (result,)
+
+
+class ExpressionFilteredLatentOperation:
+    EXTENDED_LATENT_OPERATION = True
+
+    def __init__(
+        self,
+        *,
+        ocs_filter: Filter,
+        latent_refs: dict[str, torch.Tensor] | None = None,
+    ) -> None:
+        self.filter = ocs_filter
+        self.latent_refs = latent_refs if latent_refs is not None else {}
+
+    def __call__(
+        self,
+        latent: torch.Tensor,
+        *,
+        sigma: float | torch.Tensor | None = None,
+        **kwargs: dict,
+    ) -> torch.Tensor:
+        refs = FilterRefs(
+            kvs=kwargs
+            | {
+                "sigma": sigma.clone() if isinstance(sigma, torch.Tensor) else sigma,
+                "sigma_float": sigma.max().item()
+                if isinstance(sigma, torch.Tensor)
+                else sigma,
+            }
+            | {k: v.to(latent, copy=True) for k, v in self.latent_refs.items()}
+        )
+        return self.filter.apply(latent, refs=refs)
+
+
+class ExpressionFilteredLatentOperationNode:
+    DESCRIPTION = "TBD"
+
+    FUNCTION = "go"
+    RETURN_TYPES = ("LATENT_OPERATION",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        MODULES.initialize()
+        return {
+            "required": {
+                "yaml_config": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "placeholder": """\
+    # YAML or JSON filter definition
+    """,
+                        "multiline": True,
+                        "dynamicPrompts": False,
+                        "tooltip": "Enter your filter definition here. There is essentially no error handling.",
+                    },
+                ),
+            },
+            "optional": {
+                "latent_ref_1_opt": ("LATENT",),
+                "latent_ref_2_opt": ("LATENT",),
+                "latent_ref_3_opt": ("LATENT",),
+            },
+        }
+
+    def go(
+        self,
+        *,
+        yaml_config: str,
+        latent_ref_1_opt: dict | None = None,
+        latent_ref_2_opt: dict | None = None,
+        latent_ref_3_opt: dict | None = None,
+    ) -> tuple:
+        config = yaml.safe_load(yaml_config)
+        if not isinstance(config, dict) or "filter" not in config:
+            raise ValueError(
+                "Bad YAML config type (must be object) or missing filter key in config"
+            )
+        filter_def = config.get("filter")
+        if not isinstance(filter_def, dict):
+            raise ValueError("Bad type for filter definition, must be object")
+        latent_refs = {
+            k: v["samples"].to(device="cpu", dtype=torch.float32, copy=True)
+            for k, v in (
+                ("latent_ref_1", latent_ref_1_opt),
+                ("latent_ref_2", latent_ref_2_opt),
+                ("latent_ref_3", latent_ref_3_opt),
+            )
+            if v is not None
+        }
+        ocs_filter = make_filter(filter_def)
+        return (
+            ExpressionFilteredLatentOperation(
+                ocs_filter=ocs_filter, latent_refs=latent_refs
+            ),
+        )
+
+
+class ExpressionFilteredModelPatchNode:
+    DESCRIPTION = "TBD"
+
+    FUNCTION = "go"
+    RETURN_TYPES = ("MODEL",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        MODULES.initialize()
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "patch_mode": (
+                    ("apply_model", "pre_cfg", "post_cfg", "cfg", "denoise_mask"),
+                    {"default": "apply_model"},
+                ),
+                "existing_patch_mode": (
+                    ("normal", "extract", "extract_split", "extract_sequence"),
+                    {
+                        "default": "normal",
+                        "tooltip": "Modes:\n"
+                        "normal: Replaces apply_model or cfg patches, appends for pre_cfg and post_cfg.\n"
+                        "extract: Removes the existing patches and passes old_result with the output from existing patches.\n"
+                        "extract_split: Same as extract except you'll get tuple of results for each existing patch (apply_model and cfg will always be length 1).\n"
+                        "extract_sequence: Like extract_split except existing patches do not see each other's effects.",
+                    },
+                ),
+                "yaml_config": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "placeholder": """\
+    # YAML or JSON filter definition
+    """,
+                        "multiline": True,
+                        "dynamicPrompts": False,
+                        "tooltip": "Enter your filter definition here. There is essentially no error handling.",
+                    },
+                ),
+            },
+            "optional": {
+                "latent_ref_1_opt": ("LATENT",),
+                "latent_ref_2_opt": ("LATENT",),
+                "latent_ref_3_opt": ("LATENT",),
+            },
+        }
+
+    def go(
+        self,
+        *,
+        yaml_config: str,
+        model: object,
+        patch_mode: str,
+        existing_patch_mode: str,
+        latent_ref_1_opt: dict | None = None,
+        latent_ref_2_opt: dict | None = None,
+        latent_ref_3_opt: dict | None = None,
+    ) -> tuple:
+        config = yaml.safe_load(yaml_config)
+        if not isinstance(config, dict) or "filter" not in config:
+            raise ValueError(
+                "Bad YAML config type (must be object) or missing filter key in config"
+            )
+        filter_def = config.get("filter")
+        if not isinstance(filter_def, dict):
+            raise ValueError("Bad type for filter definition, must be object")
+        latent_refs = {
+            k: v["samples"].to(device="cpu", dtype=torch.float32, copy=True)
+            for k, v in (
+                ("latent_ref_1", latent_ref_1_opt),
+                ("latent_ref_2", latent_ref_2_opt),
+                ("latent_ref_3", latent_ref_3_opt),
+            )
+            if v is not None
+        }
+        ocs_filter = make_filter(filter_def)
+        model = model.clone()
+        mode_keys = {
+            "post_cfg": "sampler_post_cfg_function",
+            "pre_cfg": "sampler_pre_cfg_function",
+            "apply_model": "model_function_wrapper",
+            "cfg": "sampler_cfg_function",
+            "denoise_mask": "denoise_mask_function",
+        }
+        key = mode_keys.get(patch_mode)
+        if key is None:
+            raise ValueError(f"Bad mode: {patch_mode}")
+        if existing_patch_mode != "normal":
+            old_handlers = model.model_options.pop(key, None)
+            if old_handlers is None:
+                old_handlers = ()
+        else:
+            old_handlers = ()
+
+        def get_refs(*args, **kwargs) -> FilterRefs:
+            old_results = []
+            if patch_mode in {"pre_cfg", "post_cfg", "cfg"}:
+                argdict = args[0]
+            elif patch_mode == "denoise_mask":
+                argdict = {
+                    "sigma": args[0],
+                    "denoise_mask": args[1].clone(),
+                    "sigmas": kwargs["extra_options"]["sigmas"].clone(),
+                }
+            elif patch_mode == "apply_model":
+                argdict = args[1] | {"apply_function": args[0]}
+            else:
+                raise ValueError(f"Bad patch mode: {patch_mode}")
+            if old_handlers:
+                ridx = 0 if existing_patch_mode == "extract_sequence" else -1
+                if patch_mode in {"cfg", "denoise_mask", "apply_model"}:
+                    old_results = (old_handlers[0](*args, **kwargs),)
+                elif patch_mode == "pre_cfg":
+                    old_results = [argdict["conds_out"]]
+                    for hf in old_handlers:
+                        result = hf(argdict | {"conds_out": old_results[ridx]}).copy()
+                        if len(old_results) > 1 and existing_patch_mode != "extract":
+                            old_results[1] = result
+                        else:
+                            old_results.append(result)
+                    old_results = old_results[1:]
+                elif patch_mode == "post_cfg":
+                    old_results = [argdict["denoised"].clone()]
+                    for hf in old_handlers:
+                        result = hf(argdict | {"denoised": old_results[ridx].clone()})
+                        if len(old_results) > 1 and existing_patch_mode != "extract":
+                            old_results[1] = result
+                        else:
+                            old_results.append(result)
+                    old_results = old_results[1:]
+            kvs = {
+                "sigma": argdict["sigma"].clone(),
+                "sigma_float": argdict["sigma"].max().item(),
+                "old_results": tuple(old_results),
+            }
+            if patch_mode in {"pre_cfg", "post_cfg", "cfg"}:
+                kvs |= {
+                    "x": argdict["input"].clone(),
+                    "cfg_scale": argdict["cond_scale"],
+                }
+                if patch_mode in {"post_cfg", "cfg"}:
+                    kvs["cond"] = argdict["cond_denoised"].clone()
+                    uncond = argdict.get("uncond_denoised", None)
+                    kvs["uncond"] = uncond if uncond is None else uncond.clone()
+                    if patch_mode == "post_cfg":
+                        kvs["denoised"] = argdict["denoised"].clone()
+                else:
+                    conds_out = argdict["conds_out"]
+                    kvs["cond"] = conds_out[0].clone()
+                    kvs["uncond"] = (
+                        conds_out[1].clone()
+                        if len(conds_out) > 1 and conds_out[1] is not None
+                        else None
+                    )
+                    kvs["conds_out"] = list(conds_out)
+            elif patch_mode == "denoise_mask":
+                kvs |= {
+                    "sigmas": argdict["sigmas"],
+                    "denoise_mask": argdict["denoise_mask"],
+                }
+            elif patch_mode == "apply_model":
+                kvs |= {
+                    "x": argdict["input"].clone(),
+                    "cond_or_uncond": argdict["cond_or_uncond"].clone(),
+                }
+            else:
+                raise ValueError(f"Bad patch mode: {patch_mode}")
+            if patch_mode in {"pre_cfg", "post_cfg", "cfg", "apply_model"}:
+                latent_in = kvs["x"]
+            else:
+                latent_in = kvs["denoise_mask"]
+            kvs |= {k: v.to(latent_in) for k, v in latent_refs.items()}
+            return FilterRefs(kvs=kvs)
+
+        def model_patch(*args, **kwargs):
+            refs = get_refs(*args, **kwargs)
+            if patch_mode == "apply_model":
+
+                def fallback_apply_model():
+                    old_results = refs.kvs["old_results"]
+                    if old_results:
+                        return old_results[-1]
+                    return args[0](
+                        args[1]["input"], args[1]["timestep"], **args[1]["c"]
+                    )
+            else:
+                fallback_apply_model = None
+            if not ocs_filter.check_applies(refs):
+                old_results = refs.kvs["old_results"]
+                if old_results:
+                    return old_results[-1]
+                if patch_mode == "pre_cfg":
+                    return args[0]["conds_out"]
+                if patch_mode == "post_cfg":
+                    return args[0]["denoised"]
+                if patch_mode == "cfg":
+                    return args[0]["cond"]
+                if patch_mode == "denoise_mask":
+                    return args[1]
+                if patch_mode == "apply_model":
+                    return fallback_apply_model()
+                raise ValueError(f"Bad patch mode: {patch_mode}")
+            if patch_mode in {"pre_cfg", "post_cfg", "cfg", "apply_model"}:
+                latent_in = refs.kvs["x"]
+            else:
+                latent_in = refs.kvs["denoise_mask"]
+            result = ocs_filter.apply(latent_in, refs=refs)
+            if patch_mode == "apply_model" and result is None:
+                return fallback_apply_model()
+            if patch_mode == "pre_cfg":
+                return list(result)
+            return result
+
+        if patch_mode == "pre_cfg":
+            model.set_model_sampler_pre_cfg_function(model_patch)
+        elif patch_mode == "post_cfg":
+            model.set_model_sampler_post_cfg_function(model_patch)
+        elif patch_mode == "cfg":
+            model.set_model_sampler_cfg_function(model_patch)
+        elif patch_mode == "denoise_mask":
+            model.set_model_denoise_mask_function(model_patch)
+        elif patch_mode == "apply_model":
+            model.set_model_unet_function_wrapper(model_patch)
+        else:
+            raise ValueError(f"Bad patch mode: {patch_mode}")
+        return (model,)
 
 
 __all__ = (

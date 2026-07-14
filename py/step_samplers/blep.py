@@ -1,19 +1,18 @@
+import inspect
+import math
 import typing
 
-import inspect
+import comfy
 import torch
 
-import comfy
-
-from .. import filtering
 from .. import expression as expr
+from .. import filtering
 from ..utils import fallback
 from .base import (
-    StepSamplerContext,
     SingleStepSampler,
+    StepSamplerContext,
     registry,
 )
-
 
 try:
     import pytorch_wavelets as ptwav
@@ -531,7 +530,10 @@ class WeoonStep(SingleStepSampler):
         )
         denoised_new = self.wavelet_inverse(coeffs_out)
         if denoised_new.shape != x.shape:
-            denoised_new = denoised_new.reshape(*x.shape)
+            bi_elements = math.prod(x.shape[1:])
+            denoised_new = denoised_new.reshape(x.shape[0], -1)[
+                :, :bi_elements
+            ].reshape(*x.shape)
         x = self.blend(denoised_new, x, ratio)
         yield from self.result(x, sigma_up)
 
