@@ -2,8 +2,10 @@ class Empty:
     def __bool__(self):
         return False
 
+
 class ExpReturn(Exception):
     pass
+
 
 class ExpBase:
     def __bool__(self):
@@ -43,8 +45,10 @@ class ExpSym(str, ExpBase):
 class ExpTuple(tuple, ExpBase):
     __slots__ = ()
 
-    def clone(self):
-        return self.__class__(v.clone() if isinstance(ExpBase) else v for v in self)
+    def clone(self, **kwargs):
+        return self.__class__(
+            v.clone(**kwargs) if isinstance(v, ExpBase) else v for v in self
+        )
 
     def get_eval(self, k, handlers, *args, default=None, **kwargs):
         val = super().__getitem__(k)
@@ -79,9 +83,10 @@ class ExpKV(ExpBase):
 class ExpDict(dict, ExpBase):
     __slots__ = ()
 
-    def clone(self):
-        return self.__class__(v.clone() if isinstance(ExpBase) else v for v in self)
-
+    def clone(self, **kwargs):
+        return self.__class__(
+            v.clone(**kwargs) if isinstance(v, ExpBase) else v for v in self
+        )
 
     def get_eval(self, k, handlers, *args, default=Empty, **kwargs):
         val = super().get(k, default)
@@ -167,7 +172,7 @@ class ExprGetter:
 
 
 class ExpMethodAp(ExpBase):
-    __slots__ = ("object_expression", "funap")
+    __slots__ = ("funap", "object_expression")
 
     def __init__(self, object_expression, funap):
         super().__init__()
@@ -189,11 +194,12 @@ class ExpMethodAp(ExpBase):
             **kwargs,
         )
 
-    def clone(self):
+    def clone(self, **kwargs):
         return self.__class__(
-            object_expression=self.object_expression.clone(),
-            funap=self.funap.clone(),
+            object_expression=self.object_expression.clone(**kwargs),
+            funap=self.funap.clone(**kwargs),
         )
+
     __copy__ = clone
 
     def __getattr__(self, k):
@@ -213,7 +219,7 @@ class ExpMethodAp(ExpBase):
 
 
 class ExpFunAp(ExpBase):
-    __slots__ = ("name", "args", "kwargs")
+    __slots__ = ("args", "kwargs", "name")
 
     def __init__(self, name, args=None, kwargs=None):
         self.name = name
@@ -226,8 +232,12 @@ class ExpFunAp(ExpBase):
             raise KeyError(f"No handler for op: {self.name!r}")
         return handler(self, getter=ExprGetter(self, handlers, args, kwargs), **kwargs)
 
-    def clone(self):
-        return self.__class__(self.name, self.args.clone(), self.kwargs.clone())
+    def clone(self, **kwargs):
+        return self.__class__(
+            self.name,
+            self.args.clone(**kwargs),
+            self.kwargs.clone(**kwargs),
+        )
 
     def pretty_string(self, depth=0):
         pad = " " * (depth + 1) * 2
@@ -259,13 +269,13 @@ class ExpBoundFunAp(ExpFunAp):
 
 __all__ = (
     "ExpBase",
-    "ExpOp",
     "ExpBinOp",
-    "ExpSym",
-    "ExpTuple",
-    "ExpKV",
+    "ExpBoundFunAp",
     "ExpDict",
     "ExpFunAp",
+    "ExpKV",
     "ExpMethodAp",
-    "ExpBoundFunAp",
+    "ExpOp",
+    "ExpSym",
+    "ExpTuple",
 )

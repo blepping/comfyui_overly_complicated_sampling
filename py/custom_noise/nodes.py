@@ -1272,6 +1272,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
             "operation_result": operation_result,
         }
         ocs_verbose = False
+        ocs_force_params = ()
         if yaml_parameters:
             extra_params = yaml.safe_load(yaml_parameters)
             if extra_params is None:
@@ -1283,6 +1284,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
             else:
                 ocs_extra = extra_params.pop("ocs", {})
                 ocs_verbose = bool(ocs_extra.pop("verbose", False))
+                ocs_force_params = tuple(ocs_extra.pop("force_params", ()) or ())
                 override_extra = ocs_extra.pop("override", {})
                 immiscible_extra = ocs_extra.pop("immiscible", {})
                 overridecfg_kwargs |= override_extra
@@ -1316,6 +1318,7 @@ class SamplerNodeConfigOverride(metaclass=IntegratedNode):
             self.sampler_function,
             ocs_override_sampler_cfg=OverrideSamplerConfig(
                 verbose=ocs_verbose,
+                force_params=ocs_force_params,
                 sampler=sampler,
                 sampler_kwargs=sampler_kwargs,
                 immiscible=ImmiscibleConfig(**immisciblecfg_kwargs),
@@ -1732,6 +1735,8 @@ class ExpressionFilteredNoiseItem(CustomNoiseItemBase):
         noise_filter: filtering.Filter,
         ref_filter: filtering.Filter | None,
         latent_refs: dict,
+        call_sampler: bool = True,
+        list_mode: bool = False,
     ):
         super().__init__(
             factor,
@@ -1740,6 +1745,8 @@ class ExpressionFilteredNoiseItem(CustomNoiseItemBase):
             ref_filter=ref_filter,
             normalize=normalize,
             latent_refs={k: v.clone() for k, v in latent_refs.items()},
+            call_sampler=call_sampler,
+            list_mode=list_mode,
         )
 
     def clone_key(self, k):
@@ -1756,6 +1763,7 @@ class ExpressionFilteredNoiseItem(CustomNoiseItemBase):
         normalized=True,
         **kwargs: Any,
     ) -> Callable:
+        list_mode = self.list_mode
         noise_filter = self.noise_filter
         initial_shape = x.shape
         latent_refs = self.latent_refs
@@ -1764,51 +1772,86 @@ class ExpressionFilteredNoiseItem(CustomNoiseItemBase):
                 x,
                 refs=filtering.FilterRefs({k: v.to(x) for k, v in latent_refs.items()}),
             )
-        ns = self.noise.make_noise_sampler(x, *args, normalized=False, **kwargs)
-        normalize_noise = self.normalize != False and normalized  # noqa: E712
+        if list_mode:
+            list_items = getattr(self.noise, "items", None)
+            if list_items is not None and not isinstance(list_items, (list, tuple)):
+                raise TypeError("Bad type for noise.items - expected a list or tuple")
+            ns_items = (self.noise,) if list_items is None else tuple(list_items)
+        else:
+            ns_items = (self.noise,)
+        ns_items = tuple(
+            n.make_noise_sampler(x, *args, normalized=False, **kwargs) for n in ns_items
+        )
+        if not ns_items:
+            raise ValueError("Noise sampler list is empty!")
+        # ns = self.noise.make_noise_sampler(x, *args, normalized=False, **kwargs)
+        normalize_noise = self.normalize != False and normalized
         factor = self.factor
-        sample_counter = 0
         initial_x = x.clone()
+        call_sampler = self.call_sampler
+        kvs = {
+            "initial_x": initial_x,
+            "initial_shape": initial_shape,
+        } | {k: v.to(initial_x) for k, v in latent_refs.items()}
+        sample_counter = 0
         last_noise = None
 
         def noise_sampler(s, sn, *args: Any, **kwargs: Any) -> torch.Tensor:
             nonlocal sample_counter, last_noise
-            noise = ns(s, sn)
+            s_orig, sn_orig = (
+                t.clone() if isinstance(t, torch.Tensor) else t for t in (s, sn)
+            )
+            curr_samplers = tuple(
+                functools.partial(ns, s_orig, sn_orig, *args, **kwargs)
+                for ns in ns_items
+            )
+            noise = curr_samplers[0]() if call_sampler else initial_x
             if (
                 isinstance(s, torch.Tensor)
                 and isinstance(sn, torch.Tensor)
+                and s.numel() > 1
                 and s.ndim < initial_x.ndim
             ):
                 padded_shape = tuple(-1 if d == 0 else 1 for d in range(initial_x.ndim))
                 s, sn = s.reshape(padded_shape), sn.reshape(padded_shape)
 
             refs = filtering.FilterRefs(
-                {
-                    "sigma": s.clone() if isinstance(s, torch.Tensor) else s,
-                    "sigma_next": sn.clone() if isinstance(sn, torch.Tensor) else sn,
+                kvs
+                | {
+                    "sigma": s,
+                    "sigma_next": sn,
+                    "sigma_orig": s_orig,
+                    "sigma_next_orig": sn_orig,
                     "sample_counter": sample_counter,
-                    "initial_x": initial_x,
-                    "initial_shape": initial_shape,
                     "last_noise": last_noise,
+                    "noise_samplers": tuple(
+                        functools.partial(ns, s_orig, sn_orig, *args, **kwargs)
+                        for ns in ns_items
+                    ),
                 }
-                | {k: v.to(noise) for k, v in latent_refs.items()}
             )
             sample_counter += 1
             noise = noise_filter.apply(noise, refs=refs)
-            noise = scale_noise(noise, factor, normalized=normalize_noise)
-            last_noise = noise.clone()
+            if isinstance(noise, dict):
+                last_noise = noise["last"]
+                if isinstance(last_noise, torch.Tensor):
+                    last_noise = last_noise.clone()
+                noise = scale_noise(noise["result"], factor, normalized=normalize_noise)
+            else:
+                noise = scale_noise(noise, factor, normalized=normalize_noise)
+                last_noise = noise.clone()
             return noise
 
         return noise_sampler
 
 
 class ExpressionFilteredNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
-    DESCRIPTION = "Immiscible noise that uses a latent reference."
+    DESCRIPTION = "Allows applying an OCS filter to custom noise. The following keys are supported:\nfilter: defines a filter for the generated noise. The filter will have these globals in scope: sigma, sigma_next, sample_counter, initial_x, initial_shape, last_noise (none on the first call), latent_ref_1 (to 3), noise_samplers (tuple of callables, must pass sigma and sigma_next). The filter should return either a tensor or a dict with result (noise to use) and last (tensor to use for last_noise) keys.\nUse the ref_filter key to define a filter for the initial latent reference. This will only be passed the latent (as default) and latent references.\ncall_sampler: boolean that defaults to true. When disabled, default will be initial_x and items from noise_samplers must be called manually.\nlist_mode: boolean that defaults to false."
 
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(cls, *args: Any, **kwargs: Any) -> dict:
         MODULES.initialize()
-        result = super().INPUT_TYPES()
+        result = super().INPUT_TYPES(*args, **kwargs)
         result["required"] |= {
             "normalize": (
                 ("default", "forced", "disabled"),
@@ -1861,9 +1904,11 @@ class ExpressionFilteredNoiseNode(CustomNoiseNodeBase, NormalizeNoiseNodeMixin):
         latent_ref_3_opt: dict | None = None,
     ) -> tuple:
         config = yaml.safe_load(yaml_config)
-        if not isinstance(config, dict) or "filter" not in config:
+        if isinstance(config, str):
+            config = {"filter": {"final": config}}
+        elif not isinstance(config, dict) or "filter" not in config:
             raise ValueError(
-                "Bad YAML config type (must be object) or missing filter key in config"
+                "Bad YAML config type (must be object) or missing filter key in config",
             )
         noise_filter_def = config.get("filter")
         if not isinstance(noise_filter_def, dict):

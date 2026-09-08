@@ -1,44 +1,11 @@
 from __future__ import annotations
 
 import contextlib
-import math
-from functools import partial
 
 import torch
 from comfy.k_diffusion.sampling import to_d
 
-# def scale_noise_(
-#     noise,
-#     factor=1.0,
-#     *,
-#     normalized=True,
-#     normalize_dims=(-3, -2, -1),
-# ):
-#     if not normalized or noise.numel() == 0:
-#         return noise.mul_(factor) if factor != 1 else noise
-#     mean, std = (
-#         noise.mean(dim=normalize_dims, keepdim=True),
-#         noise.std(dim=normalize_dims, keepdim=True),
-#     )
-#     return latent.normalize_to_scale(
-#         noise.sub_(mean).div_(std).clamp(-1, 1), -1.0, 1.0, dim=normalize_dims
-#     ).mul_(factor)
-
-
-# def scale_noise(
-#     noise,
-#     factor=1.0,
-#     *,
-#     normalized=True,
-#     normalize_dims=(-3, -2, -1),
-# ):
-#     if not normalized or noise.numel() == 0:
-#         return noise * factor if factor != 1 else noise
-#     mean, std = (
-#         noise.mean(dim=normalize_dims, keepdim=True),
-#         noise.std(dim=normalize_dims, keepdim=True),
-#     )
-#     return (noise - mean).div_(std).mul_(factor)
+F = torch.nn.functional
 
 
 def scale_noise(
@@ -46,15 +13,27 @@ def scale_noise(
     factor: float = 1.0,
     *,
     normalized: bool = True,
-    normalize_dims: tuple[int, ...] = (-3, -2, -1),
-    eps: float = 1e-08,
+    normalize_dims: tuple[int, ...] | None = None,
+    eps: float | None = None,
 ) -> torch.Tensor:
+    if factor == 0:
+        return torch.zeros_like(noise)
     if not normalized or noise.numel() == 0:
         return noise * factor if factor != 1 else noise
-    std = noise.std(dim=normalize_dims, keepdim=True)
-    noise = noise / torch.where(std != 0.0, std, eps)
-    noise -= noise.mean(dim=normalize_dims, keepdim=True)
-    return noise if factor == 1.0 else noise.mul_(factor)
+    if eps is None:
+        eps = torch.finfo(noise.dtype).eps * 1.25
+    if normalize_dims is None:
+        normalize_dims = tuple(
+            range(
+                max(0, min(1, noise.ndim - 1)),
+                noise.ndim,
+            )
+        )
+    std, mean = torch.std_mean(noise, dim=normalize_dims, keepdim=True)
+    noise = noise - mean
+    if factor != 1:
+        std /= factor
+    return noise.div_(std.clamp_min_(eps) if factor >= 0 else std.clamp_max_(-eps))
 
 
 def range_wrap(
@@ -65,363 +44,76 @@ def range_wrap(
     return min_val + (x - min_val).remainder_(max_val - min_val)
 
 
-def _quantile_norm_scaledown(
-    noise: torch.Tensor,
-    nq: torch.Tensor,
+def softplus_soft_clamp(
+    t: torch.Tensor,
+    min_val: torch.Tensor | float = 0.0,
+    max_val: torch.Tensor | float = 1.0,
     *,
-    dim,
-    **_kwargs: dict,
+    # We define stiffness as a multiplier (beta) for the softplus function.
+    # Higher stiffness = sharper transition.
+    stiffness: float = 1.0,
+    safe: bool = True,
 ) -> torch.Tensor:
-    noiseabs = noise.abs()
-    mv = noiseabs.max(dim=dim, keepdim=True).values.clamp(min=1e-06)
-    return (
-        noise
-        if mv.sum().item() == 0
-        else torch.where(noiseabs > nq, noise * (nq / mv), noise)
-    )
+    if isinstance(min_val, (float, int)):
+        min_val = t.new_tensor(min_val)
+    if isinstance(max_val, (float, int)):
+        max_val = t.new_tensor(max_val)
+
+    if stiffness < 1e-04:
+        return t.clamp(min_val, max_val)
+
+    # Calculate how much we are exceeding the Max
+    # softplus(beta * x) / beta
+    upper_overshoot = F.softplus((t - max_val).mul_(stiffness)).div_(-stiffness)
+
+    # Calculate how much we are falling short of the Min
+    lower_undershoot = F.softplus((min_val - t).mul_(stiffness)).div_(stiffness)
+
+    # Apply corrections:
+    # Original - (Amount over max) + (Amount under min)
+    t = upper_overshoot.add_(t).add_(lower_undershoot)
+    if safe:
+        t = t.clamp(min_val, max_val)
+    return t
 
 
-def _quantile_norm_wave(
-    noise: torch.Tensor,
-    nq: torch.Tensor,
+def flip_tensor_range(
+    x: torch.Tensor,
     *,
-    preserve_sign: bool = False,
-    wave_function=torch.sin,
-    pi_factor: float = 0.5,
-    wrong_mode: bool = False,
-    **_kwargs: dict,
-) -> torch.Tensor:
-    if wrong_mode:
-        multiplier = 1.0 / ((math.pi * pi_factor) / nq)
-    else:
-        multiplier = 1.0 / (nq / (math.pi * pi_factor))
-    pos_mask = noise >= 0
-    neg_mask = ~pos_mask
-    result = torch.zeros_like(noise)
-    result[pos_mask] = wave_function(noise.mul(multiplier))[pos_mask]
-    result[neg_mask] = wave_function(noise.mul(multiplier))[neg_mask]
-    result *= nq
-    return result.copysign(noise) if preserve_sign else result
-
-
-def _quantile_norm_mode(
-    noise: torch.Tensor,
-    nq: torch.Tensor,
-    *,
-    dim: int | None,
-    decimals=1,
-    **_kwargs: dict,
-) -> torch.Tensor:
-    return torch.where(
-        noise.abs() > nq,
-        noise.round(decimals=decimals).mode(dim=dim, keepdim=True).values,
-        noise,
-    )
-
-
-def _quantile_norm_replace(
-    noise: torch.Tensor,
-    nq: torch.Tensor,
-    *,
-    keep_sign: bool = False,
-    avoid_sign: bool = False,
-    count: int = 1,
-    count_flipping: bool = False,
-    **_kwargs: dict,
-) -> torch.Tensor:
-    mask = noise.abs() <= nq
-    candidates = noise[mask].flatten()
-    n_candidates = candidates.numel()
-    idxs = torch.arange(noise.numel()) % n_candidates
-    cresult = candidates[idxs]
-    if count < 2:
-        candidates = cresult
-    else:
-        multiplier = 1.0 / count
-        cresult = cresult * multiplier  # noqa: PLR6104
-        for i in range(1, count):
-            cresult += (
-                candidates[
-                    torch.roll(
-                        idxs,
-                        i if not count_flipping or (i % 2) == 0 else -i,
-                        dims=(-1,),
-                    )
-                ]
-                * multiplier
-            )
-    candidates = cresult.reshape(noise.shape)
-    if keep_sign or avoid_sign:
-        candidates = candidates.copysign_(noise.neg() if avoid_sign else noise)
-    return torch.where(mask, noise, candidates)
-
-
-quantile_handlers = {
-    "clamp": lambda noise, nq, **_kwargs: noise.clamp(-nq, nq),
-    "scale_down": _quantile_norm_scaledown,
-    "tanh": lambda noise, nq, **_kwargs: noise.tanh().mul_(nq.abs()),
-    "tanh_outliers": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() > nq,
-        noise.tanh().mul_(nq.abs()),
-        noise,
-    ),
-    "sigmoid_keepsign": lambda noise, nq, **_kwargs: (
-        noise.sigmoid().mul_(nq.abs()).copysign(noise)
-    ),
-    "sigmoid": lambda noise, nq, **_kwargs: (
-        noise.sigmoid().mul_(nq.abs() * 2).sub_(nq.abs())
-    ),
-    "sigmoid_outliers": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() > nq,
-        noise.sigmoid().mul_(nq.abs()).copysign(noise),
-        noise,
-    ),
-    "sin": partial(_quantile_norm_wave, wave_function=torch.sin),
-    "sin_wholepi": partial(
-        _quantile_norm_wave,
-        wave_function=torch.sin,
-        pi_factor=1.0,
-    ),
-    "sin_keepsign": partial(
-        _quantile_norm_wave,
-        wave_function=torch.sin,
-        preserve_sign=True,
-    ),
-    "sin_wrong": partial(_quantile_norm_wave, wave_function=torch.sin, wrong_mode=True),
-    "sin_wrong_wholepi": partial(
-        _quantile_norm_wave,
-        wave_function=torch.sin,
-        pi_factor=1.0,
-        wrong_mode=True,
-    ),
-    "sin_wrong_keepsign": partial(
-        _quantile_norm_wave,
-        wave_function=torch.sin,
-        preserve_sign=True,
-        wrong_mode=True,
-    ),
-    "cos": partial(_quantile_norm_wave, wave_function=torch.cos),
-    "cos_wholepi": partial(
-        _quantile_norm_wave,
-        wave_function=torch.cos,
-        pi_factor=1.0,
-    ),
-    "cos_keepsign": partial(
-        _quantile_norm_wave,
-        wave_function=torch.cos,
-        preserve_sign=True,
-    ),
-    "cos_wrong": partial(_quantile_norm_wave, wave_function=torch.cos, wrong_mode=True),
-    "cos_wrong_wholepi": partial(
-        _quantile_norm_wave,
-        wave_function=torch.cos,
-        pi_factor=1.0,
-        wrong_mode=True,
-    ),
-    "cos_wrong_keepsign": partial(
-        _quantile_norm_wave,
-        wave_function=torch.cos,
-        preserve_sign=True,
-        wrong_mode=True,
-    ),
-    "atan": lambda noise, nq, **_kwargs: noise.atan().mul_(nq.abs() / (math.pi / 2)),
-    "tenth": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() > nq,
-        noise * 0.1,
-        noise,
-    ),
-    "half": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() > nq,
-        noise * 0.5,
-        noise,
-    ),
-    "zero": lambda noise, nq, **_kwargs: torch.where(noise.abs() > nq, 0, noise),
-    "reverse_zero": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() >= nq,
-        noise,
-        0,
-    ),
-    "mean": lambda noise, nq, *, dim, **_kwargs: torch.where(
-        noise.abs() > nq,
-        noise.mean(dim=dim, keepdim=True),
-        noise,
-    ),
-    "median": lambda noise, nq, *, dim, **_kwargs: torch.where(
-        noise.abs() > nq,
-        noise.median(dim=dim, keepdim=True).values,
-        noise,
-    ),
-    "mode_1dec": partial(_quantile_norm_mode, decimals=1),
-    "mode_2dec": partial(_quantile_norm_mode, decimals=2),
-    "replace": _quantile_norm_replace,
-    "replace_keepsign": partial(_quantile_norm_replace, keep_sign=True),
-    "replace_avoidsign": partial(_quantile_norm_replace, avoid_sign=True),
-    "replace_2pt": partial(_quantile_norm_replace, count=2),
-    "replace_3pt": partial(_quantile_norm_replace, count=3),
-    "replace_2pt_flip": partial(_quantile_norm_replace, count=2, count_flipping=True),
-    "replace_3pt_flip": partial(_quantile_norm_replace, count=3, count_flipping=True),
-    "replace_2pt_keepsign": partial(
-        _quantile_norm_replace,
-        count=2,
-        keep_sign=True,
-    ),
-    "replace_3pt_keepsign": partial(
-        _quantile_norm_replace,
-        count=3,
-        keep_sign=True,
-    ),
-    "replace_2pt_flip_keepsign": partial(
-        _quantile_norm_replace,
-        count=2,
-        count_flipping=True,
-        keep_sign=True,
-    ),
-    "replace_3pt_flip_keepsign": partial(
-        _quantile_norm_replace,
-        count=3,
-        count_flipping=True,
-        keep_sign=True,
-    ),
-    "replace_2pt_avoidsign": partial(
-        _quantile_norm_replace,
-        count=2,
-        avoid_sign=True,
-    ),
-    "replace_3pt_avoidsign": partial(
-        _quantile_norm_replace,
-        count=3,
-        avoid_sign=True,
-    ),
-    "replace_2pt_flip_avoidsign": partial(
-        _quantile_norm_replace,
-        count=2,
-        count_flipping=True,
-        avoid_sign=True,
-    ),
-    "replace_3pt_flip_avoidsign": partial(
-        _quantile_norm_replace,
-        count=3,
-        count_flipping=True,
-        avoid_sign=True,
-    ),
-    "wrap": lambda noise, nq, **_kwargs: range_wrap(noise, -nq, nq),
-    "wrap_keepsign": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() > nq,
-        range_wrap(noise, -nq, nq).copysign_(noise),
-        noise,
-    ),
-    "wrap_avoidsign": lambda noise, nq, **_kwargs: torch.where(
-        noise.abs() > nq,
-        range_wrap(noise, -nq, nq).copysign_(noise.neg()),
-        noise,
-    ),
-}
-
-
-# Initial version based on Studentt distribution normalizatino from https://github.com/Clybius/ComfyUI-Extra-Samplers/
-def quantile_normalize(
-    noise: torch.Tensor,
-    *,
-    quantile: float | tuple | list = 0.75,
-    dim: int | None = 1,
-    flatten: bool = True,
-    nq_fac: float = 1.0,
-    pow_fac: float = 0.5,
-    strategy: str = "clamp",
-    strategy_handler=None,
-    eps=1e-08,
-) -> torch.Tensor:
-    if noise.numel() == 0:
-        return noise
-    if isinstance(quantile, (tuple, list)):
-        for q in quantile:
-            noise = quantile_normalize(
-                noise=noise,
-                quantile=q,
-                dim=dim,
-                flatten=flatten,
-                nq_fac=nq_fac,
-                pow_fac=pow_fac,
-                strategy=strategy,
-                strategy_handler=strategy_handler,
-            )
-        return noise
-    if quantile is None or quantile >= 1 or quantile <= -1:
-        return noise
-    centered = quantile < 0
-    absquantile = abs(quantile)
-    orig_shape = noise.shape
-    if noise.ndim > 1 and flatten:
-        flatnoise = noise.flatten(start_dim=dim)
-    else:
-        flatten = False
-        flatnoise = noise
-    handler = (
-        quantile_handlers.get(strategy)
-        if strategy_handler is None
-        else strategy_handler
-    )
-    if handler is None:
-        raise ValueError("Unknown strategy")
-    if not centered:
-        nq = torch.quantile(
-            flatnoise.abs(),
-            quantile,
-            dim=-1 if flatten else dim,
-            keepdim=True,
+    min_neg: torch.Tensor | None = None,
+    max_pos: torch.Tensor | None = None,
+    return_ranges: bool = False,
+    dim: int = -1,
+    eps: float | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if eps is None:
+        eps = torch.finfo(x.dtype).eps * 1.25
+    # 1. Use the provided maximum positive values, or calculate them dynamically
+    if max_pos is None:
+        max_pos = (
+            torch.clamp_min(x, 0.0).max(dim=dim, keepdim=True).values.clamp_min_(eps)
         )
-        nq = nq.mul_(nq_fac).add_(eps)
-        # print(f"\nNQ: {nq}")
-        noise = handler(
-            flatnoise,
-            nq,
-            orig_noise=noise,
-            dim=dim,
-            flatten=flatten,
-        )
-    else:
-        absnoise = flatnoise.abs()
-        maxabs = absnoise.amax(dim=-1 if flatten else dim, keepdim=True)
-        proxy = flatnoise.sign().mul_(maxabs - absnoise)
-        nq_proxy = torch.quantile(
-            proxy.abs(),
-            absquantile,
-            dim=-1 if flatten else dim,
-            keepdim=True,
-        )
-        nq_proxy = nq_proxy.mul_(nq_fac).add_(eps)
-        # print(f"\nNQ proxy: {nq_proxy}")
-        out_proxy = handler(
-            proxy,
-            nq_proxy,
-            orig_noise=noise,
-            dim=dim,
-            flatten=flatten,
-        )
-        noise = out_proxy.sign().mul_(maxabs - out_proxy.abs())
-    if pow_fac not in {0.0, 1.0}:
-        noise = noise.abs().pow_(pow_fac).copysign(noise)
-    return noise if noise.shape == orig_shape else noise.reshape(orig_shape)
 
+    # 2. Use the provided minimum negative values, or calculate them dynamically
+    if min_neg is None:
+        min_neg = (
+            torch.clamp_max(x, 0.0).min(dim=dim, keepdim=True).values.clamp_max_(-eps)
+        )
 
-# def scale_noise(
-#     noise,
-#     factor=1.0,
-#     *,
-#     normalized=True,
-#     normalize_dims=(-3, -2, -1),
-# ):
-#     if not normalized or noise.numel() == 0:
-#         return noise.mul_(factor) if factor != 1 else noise
-#     n = (
-#         torch.nn.LayerNorm(noise.shape[1:])
-#         if normalize_dims == (-3, -2, -1)
-#         else torch.nn.InstanceNorm2d(noise.shape[1])
-#     ).to(noise)
-#     return n(noise) * factor
-#     return latent.normalize_to_scale(
-#         n(noise).clamp_(-1, 1), -1, 1, dim=normalize_dims
-#     ).mul_(factor)
+    # 3. Separate positive and negative elements
+    is_pos = x >= 0
+
+    # 4. Flip positive side: [0, max_pos] -> [eps, max_pos + eps]
+    x_pos = x.clamp_min(eps)
+    flipped_pos = (max_pos + eps) - x_pos
+
+    # 5. Flip negative side: [min_neg, 0] -> [min_neg - eps, -eps]
+    x_neg = x.clamp_max(-eps)
+    flipped_neg = (min_neg - eps) - x_neg
+
+    # 6. Recombine the domains
+    result = torch.where(is_pos, flipped_pos, flipped_neg)
+    return (result, max_pos, min_neg) if return_ranges else result
 
 
 def find_first_unsorted(tensor, desc=True):

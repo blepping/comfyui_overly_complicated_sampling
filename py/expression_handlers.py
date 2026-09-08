@@ -1,5 +1,4 @@
 import os
-from functools import partial
 
 import numpy as np
 import PIL.Image as PILImage
@@ -8,8 +7,17 @@ import torch
 from . import expression as expr
 from . import latent, unsafe_expression_whitelists
 from .external import MODULES as EXT
-from .latent import OCSTAESD, ImageBatch, flip_tensor_range, normalize_to_scale
-from .utils import quantile_normalize, resolve_value, scale_noise
+from .latent import (
+    OCSTAESD,
+    DimCorrelationConfig,
+    ImageBatch,
+    normalize_to_scale,
+    randomized_svd,
+)
+from .quantile_norm import quantile_normalize
+from .utils import flip_tensor_range, resolve_value, scale_noise, softplus_soft_clamp
+
+F = torch.nn.functional
 
 ALLOW_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_UNSAFE_EXPRESSIONS") is not None
 ALLOW_ALL_UNSAFE = os.environ.get("COMFYUI_OCS_ALLOW_ALL_UNSAFE") is not None
@@ -37,6 +45,20 @@ def init_integrations(integrations):
 
 
 EXT.register_init_handler(init_integrations)
+
+
+class UnaryTensorOpHandler(expr.BaseHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def __init__(self, handler):
+        super().__init__()
+        self.handler = handler
+
+    def handle(self, obj, getter):
+        (tensor,) = self.safe_get_all(obj, getter)
+        return self.handler(tensor)
+
+    validate_output = expr.Arg.tensor("output")
 
 
 class NormHandler(expr.BaseHandler):
@@ -104,12 +126,18 @@ class ClampHandler(NormHandler):
         return torch.clamp(tensor, min=tmin, max=tmax)
 
 
-class AbsHandler(NormHandler):
-    input_validators = (expr.Arg.tensor("tensor"),)
+class SoftClampHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numeric("min", 0.0),
+        expr.Arg.numeric("max", 1.0),
+        expr.Arg.numeric_scalar("stiffness", 1.0),
+        expr.Arg.boolean("safe", True),
+    )
 
     def handle(self, obj, getter):
-        (tensor,) = self.safe_get_all(obj, getter)
-        return tensor.abs()
+        tensor, tmin, tmax, stiffness, safe = self.safe_get_all(obj, getter)
+        return softplus_soft_clamp(tensor, tmin, tmax, stiffness=stiffness, safe=safe)
 
 
 class StackHandler(NormHandler):
@@ -167,11 +195,25 @@ class TrimHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numscalar_sequence("shape"),
+        expr.Arg.boolean("flip", False),
     )
 
     def handle(self, obj, getter):
-        tensor, shape = self.safe_get_all(obj, getter)
-        return tensor[tuple(slice(0, dsize) for dsize in shape)]
+        tensor, shape, flip = self.safe_get_all(obj, getter)
+        tshape = tensor.shape
+        if tensor.ndim != len(shape):
+            raise ValueError("Shape dimension count does not match tensor")
+        slices = tuple(
+            slice(None)
+            if tsize <= dsize
+            else (
+                slice(None, min(dsize, tsize))
+                if not flip
+                else slice(-min(dsize, tsize))
+            )
+            for dsize, tsize in zip(shape, tshape, strict=True)
+        )
+        return tensor[slices]
 
 
 class IndexedCopyHandler(NormHandler):
@@ -220,12 +262,16 @@ class StdHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
         expr.Arg.numscalar_sequence_or_single("dim", (-3, -2, -1)),
+        expr.Arg.numeric("eps", default=1e-07),
     )
 
     def handle(self, obj, getter):
-        tensor, dim = self.safe_get_all(obj, getter)
+        tensor, dim, eps = self.safe_get_all(obj, getter)
         dim = dim if isinstance(dim, tuple) else (dim,)
-        return tensor.std(keepdim=True, dim=dim)
+        std = tensor.std(keepdim=True, dim=dim)
+        if eps != 0:
+            std = std.clamp_min_(eps)
+        return std
 
 
 class RollHandler(NormHandler):
@@ -391,6 +437,25 @@ class MoveDimHandler(NormHandler):
         return tensor.movedim(from_dim, to_dim)
 
 
+class PermuteHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.numscalar_sequence("perms"),
+        expr.Arg.boolean("reverse", default=False),
+    )
+
+    def handle(self, obj, getter):
+        tensor, perms, reverse = self.safe_get_all(obj, getter)
+        if not reverse:
+            return tensor.permute(tuple(perms))
+        inv_perms = torch.nn.utils.rnn.invert_permutation(
+            torch.tensor(perms, device="cpu"),
+        )
+        if inv_perms is None:
+            raise RuntimeError("Failed to calculate reverse permutation")
+        return tensor.permute(tuple(inv_perms.tolist()))
+
+
 class FlattenHandler(NormHandler):
     input_validators = (
         expr.Arg.tensor("tensor"),
@@ -401,6 +466,17 @@ class FlattenHandler(NormHandler):
     def handle(self, obj, getter):
         tensor, start_dim, end_dim = self.safe_get_all(obj, getter)
         return tensor.flatten(start_dim=start_dim, end_dim=end_dim)
+
+
+class MatmulHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor1"),
+        expr.Arg.tensor("tensor2"),
+    )
+
+    def handle(self, obj, getter):
+        tensor1, tensor2 = self.safe_get_all(obj, getter)
+        return tensor1 @ tensor2
 
 
 class BlendHandler(NormHandler):
@@ -414,6 +490,7 @@ class BlendHandler(NormHandler):
                 expr.ValidateArg.validate_string,
                 expr.ValidateArg.validate_dict,
             ),
+            default="lerp",
         ),
         expr.Arg.one_of(
             "blend_kwargs",
@@ -495,7 +572,13 @@ class NoiseHandler(NormHandler):
             ctx.get_var(k, default=0.0)
             for k in ("sigma_min", "sigma_max", "sigma", "sigma_next")
         )
-        ns = latent.get_noise_sampler(typ, t, smin, smax, normalized=False)
+        ns = latent.get_noise_sampler(
+            typ,
+            t,
+            smin,
+            smax,
+            normalized=False,
+        )
         return ns(s, sn)
 
 
@@ -505,6 +588,57 @@ class ShapeHandler(expr.BaseHandler):
     def handle(self, obj, getter):
         t = self.safe_get("tensor", obj, getter)
         return expr.types.ExpTuple((*t.shape,))
+
+
+class NumelHandler(expr.BaseHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def handle(self, obj, getter):
+        t = self.safe_get("tensor", obj, getter)
+        return t.numel()
+
+
+class QRHandler(expr.BaseHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def handle(self, obj, getter):
+        tensor = self.safe_get("tensor", obj, getter)
+        return tuple(torch.linalg.qr(tensor))
+
+
+class SVDHandler(expr.BaseHandler):
+    input_validators = (expr.Arg.tensor("tensor"),)
+
+    def handle(self, obj, getter):
+        tensor = self.safe_get("tensor", obj, getter)
+        return tuple(torch.linalg.svd(tensor, full_matrices=False))
+
+
+class RandomizedSVDHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor"),
+        expr.Arg.one_of(
+            "base",
+            (
+                expr.ValidateArg.validate_none,
+                expr.ValidateArg.validate_tensor,
+            ),
+            default=None,
+        ),
+        expr.Arg.integer("n_iter", default=6),
+        expr.Arg.one_of(
+            "rank",
+            (
+                expr.ValidateArg.validate_none,
+                expr.ValidateArg.validate_integer,
+            ),
+            default=None,
+        ),
+    )
+
+    def handle(self, obj, getter):
+        tensor, base, n_iter, rank = self.safe_get_all(obj, getter)
+        return randomized_svd(tensor, y=base, n_iter=n_iter, rank=rank)
 
 
 class GaussianBlur2DHandler(NormHandler):
@@ -530,6 +664,40 @@ class SNFGuidanceHandler(NormHandler):
 
     def handle(self, obj, getter):
         return latent.snf_guidance(*self.safe_get_all(obj, getter))
+
+
+class CorrelateHandler(NormHandler):
+    input_validators = (
+        expr.Arg.tensor("tensor1"),
+        expr.Arg.one_of(
+            "tensor2",
+            (
+                expr.ValidateArg.validate_none,
+                expr.ValidateArg.validate_tensor,
+            ),
+            default=None,
+        ),
+        expr.Arg.one_of(
+            "kwargs",
+            (
+                expr.ValidateArg.validate_none,
+                expr.ValidateArg.validate_dict,
+            ),
+            default=None,
+        ),
+    )
+
+    def handle(self, obj, getter):
+        t1, t2, kwargs = self.safe_get_all(obj, getter)
+        kwargs = kwargs.copy() if kwargs is not None else {}
+        if "leave" not in kwargs:
+            kwargs["leave"] = True
+        return (
+            DimCorrelationConfig.build(**kwargs)
+            .get_correlation_order(x=t1, ref=t2)
+            .reorder(t1)
+            .clone()
+        )
 
 
 class RGBLatentHandler(expr.BaseHandler):
@@ -773,51 +941,127 @@ class ScaleNNLatentUpscaleHandler(expr.BaseHandler):
         return latent.scale_nnlatentupscale(mode, tensor, scale)
 
 
-TENSOR_OP_HANDLERS = {
-    "t_norm": NormHandler(),
-    "t_quantilenorm": QuantileNormHandler(),
-    "t_normtoscale": NormToScaleHandler(),
-    "t_normalize_to_scale": NormToScaleHandler(),
-    "t_reshape": ReshapeHandler(),
-    "t_clamp": ClampHandler(),
-    "t_abs": AbsHandler(),
-    "t_cat": CatHandler(),
-    "t_stack": StackHandler(),
-    "t_split": SplitHandler(),
-    "t_trim": TrimHandler(),
-    "t_indexed_copy": IndexedCopyHandler(),
-    "t_new_like": NewLikeHandler(),
-    "t_mean": MeanHandler(),
-    "t_std": StdHandler(),
+class ForkRngHandler(expr.BaseHandler):
+    input_validators = (
+        expr.Arg.present("expression"),
+        expr.Arg.one_of(
+            "seed",
+            (
+                expr.ValidateArg.validate_none,
+                expr.ValidateArg.validate_integer,
+            ),
+            default=None,
+        ),
+        expr.Arg.boolean("enabled", default=True),
+    )
+
+    def handle(self, obj, getter):
+        enabled = bool(self.safe_get("enabled", obj, getter))
+        seed = self.safe_get("seed", obj, getter)
+        with torch.random.fork_rng(enabled=enabled):
+            if enabled and seed is not None:
+                torch.manual_seed(seed)
+            return self.safe_get("expression", obj, getter)
+
+
+SKIP_TORCH_OPS = frozenset(
+    (
+        "fork_rng",
+        "t_cat",
+        "t_stack",
+    )
+)
+
+TORCH_OP_HANDLERS = {
+    "fork_rng": ForkRngHandler(),
     "t_blend": BlendHandler(),
-    "t_roll": RollHandler(),
-    "t_flip": FlipHandler(),
+    "t_cat": CatHandler(),
+    "t_clamp": ClampHandler(),
+    "t_soft_clamp": SoftClampHandler(),
     "t_clone": CloneHandler(),
-    "t_newfull": NewFullHandler(),
-    "t_copysign": CopySignHandler(),
-    "t_flatten": FlattenHandler(),
-    "t_movedim": MoveDimHandler(),
-    "t_min": MinHandler(),
-    "t_max": MaxHandler(),
-    "t_minimum": MinimumHandler(),
-    "t_maximum": MaximumHandler(),
-    "t_cumsum": CumSumHandler(),
     "t_contrast_adaptive_sharpening": ContrastAdaptiveSharpeningHandler(),
-    "t_scale": ScaleHandler(),
-    "t_noise": NoiseHandler(),
-    "t_shape": ShapeHandler(),
-    "t_invert_range": InvertRangeHandler(),
+    "t_copysign": CopySignHandler(),
+    "t_correlate": CorrelateHandler(),
+    "t_cumsum": CumSumHandler(),
+    "t_flatten": FlattenHandler(),
+    "t_flip": FlipHandler(),
     "t_gaussianblur2d": GaussianBlur2DHandler(),
+    "t_indexed_copy": IndexedCopyHandler(),
+    "t_invert_range": InvertRangeHandler(),
+    "t_matmul": MatmulHandler(),
+    "t_max": MaxHandler(),
+    "t_maximum": MaximumHandler(),
+    "t_mean": MeanHandler(),
+    "t_min": MinHandler(),
+    "t_minimum": MinimumHandler(),
+    "t_movedim": MoveDimHandler(),
+    "t_new_like": NewLikeHandler(),
+    "t_newfull": NewFullHandler(),
+    "t_noise": NoiseHandler(),
+    "t_norm": NormHandler(),
+    "t_normalize_to_scale": NormToScaleHandler(),
+    "t_normtoscale": NormToScaleHandler(),
+    "t_numel": NumelHandler(),
+    "t_quantilenorm": QuantileNormHandler(),
+    "t_reshape": ReshapeHandler(),
     "t_rgb_latent": RGBLatentHandler(),
+    "t_roll": RollHandler(),
+    "t_scale": ScaleHandler(),
+    "t_shape": ShapeHandler(),
+    "t_permute": PermuteHandler(),
+    "t_qr": QRHandler(),
+    "t_svd": SVDHandler(),
+    "t_randomized_svd": RandomizedSVDHandler(),
     "t_snf_guidance": SNFGuidanceHandler(),
+    "t_split": SplitHandler(),
+    "t_stack": StackHandler(),
+    "t_std": StdHandler(),
     "t_taesd_decode": TAESDDecodeHandler(),
+    "t_trim": TrimHandler(),
     "unsafe_tensor_method": UnsafeTorchTensorMethodHandler(),
     "unsafe_torch": UnsafeTorchHandler(),
 }
 
-TENSOR_OP_HANDLERS |= {
-    f"Tensor::{k[2:] if k.startswith('t_') else k}": v
-    for k, v in TENSOR_OP_HANDLERS.items()
+TORCH_UOP_HANDLERS = {
+    f"t_{k}": UnaryTensorOpHandler(handler=h)
+    for k, h in (
+        ("abs", torch.abs),
+        ("acos", torch.acos),
+        ("acosh", torch.acosh),
+        ("atan", torch.atan),
+        ("atanh", torch.atanh),
+        ("ceil", torch.ceil),
+        ("clone", torch.clone),
+        ("cos", torch.cos),
+        ("erf", torch.erf),
+        ("erfinv", torch.erfinv),
+        ("exp", torch.exp),
+        ("expm1", torch.expm1),
+        ("floor", torch.floor),
+        ("frac", torch.frac),
+        ("gelu", F.gelu),
+        ("log", torch.log),
+        ("log1p", torch.log1p),
+        ("reciprocal", torch.reciprocal),
+        ("relu", F.relu),
+        ("remainder", torch.remainder),
+        ("rsqrt", torch.rsqrt),
+        ("sigmoid", torch.sigmoid),
+        ("sign", torch.sign),
+        ("sin", torch.sin),
+        ("tan", torch.tan),
+        ("tanh", torch.tanh),
+        ("trunc", torch.trunc),
+        ("diag_embed", torch.diag_embed),
+    )
+}
+
+TORCH_OP_HANDLERS |= TORCH_UOP_HANDLERS  # ty: ignore[unsupported-operator]
+
+TORCH_OP_HANDLERS |= {
+    f"Tensor::{k.removeprefix('t_')}": v
+    for k, v in TORCH_OP_HANDLERS.items()
+    if k not in SKIP_TORCH_OPS
 }
 
 IMAGE_OP_HANDLERS = {
@@ -826,5 +1070,5 @@ IMAGE_OP_HANDLERS = {
     "img_pil_resize": ImgPILResizeHandler(),
 }
 
-HANDLERS |= TENSOR_OP_HANDLERS
+HANDLERS |= TORCH_OP_HANDLERS
 HANDLERS |= IMAGE_OP_HANDLERS

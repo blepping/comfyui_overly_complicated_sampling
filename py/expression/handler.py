@@ -1,7 +1,9 @@
 import operator
 import traceback
 
-from .types import Empty, ExpDict, ExpOp, ExpReturn
+from tqdm import tqdm
+
+from .types import Empty, ExpDict, ExpOp, ExpReturn, ExpTuple
 from .util import torch
 from .validation import Arg, ValidateArg, ValidateError
 
@@ -260,6 +262,22 @@ class UnarySimpleMathHandler(SimpleMathHandler):
     input_validators = (Arg.numeric("lhs"),)
 
 
+class SimpleOpHandler(BaseHandler):
+    input_validators = (Arg.present("lhs"), Arg.present("rhs"))
+
+    def __init__(self, handler):
+        super().__init__()
+        self.handler = handler
+
+    def handle(self, obj, getter):
+        args = (
+            self.safe_get(idx, obj, getter=getter)
+            for idx in range(len(self.input_validators))
+        )
+        result = self.handler(*args)
+        return result
+
+
 class IsSetHandler(BaseHandler):
     input_validators = (Arg.string("name"),)
 
@@ -332,6 +350,13 @@ class MaxHandler(MinHandler):
         return max(*self.safe_get("values", obj, getter))
 
 
+class SumHandler(BaseHandler):
+    input_validators = (Arg.numeric_sequence("values"),)
+
+    def handle(self, obj, getter):
+        return sum(tuple(self.safe_get("values", obj, getter)))
+
+
 class UnsafeCallHandler(BaseHandler):
     input_validators = (Arg.present("__callable"),)
 
@@ -342,7 +367,7 @@ class UnsafeCallHandler(BaseHandler):
             )
         fun = self.safe_get("__callable", obj, getter)
         if not callable(fun):
-            raise ValueError("Cannot call supplied value: not a callable")
+            raise TypeError("Cannot call supplied value: not a callable")
         args = (self.safe_get(idx, obj, getter) for idx in range(1, len(obj.args)))
         kwargs = {k: self.safe_get(k, obj, getter) for k in obj.kwargs}
         return fun(*args, **kwargs)
@@ -376,6 +401,46 @@ class ReturnHandler(BaseHandler):
         raise ExpReturn(self.safe_get("expression", obj, getter))
 
 
+class PrintHandler(BaseHandler):
+    input_validators = (Arg.present("lhs"),)
+
+    def handle(self, obj, getter):
+        lhs = self.safe_get("lhs", obj, getter)
+        tqdm.write(f"[OCS expr_print]: {lhs!s}")
+
+
+class MapHandler(BaseHandler):
+    input_validators = (
+        Arg.sequence("items"),
+        Arg.string("key", default="item"),
+        Arg.present("expression"),
+        Arg.present("check_expression", default=None),
+    )
+
+    class _MapEmpty:
+        pass
+
+    def handle(self, obj, getter):
+        items = self.safe_get("items", obj, getter)
+        key = self.safe_get("key", obj, getter)
+        have_check_expr = None
+        result = []
+        for item in items:
+            getter.ctx.set_var(key, item)
+            if have_check_expr in {True, None}:
+                checked = self.safe_get(
+                    "check_expression",
+                    obj,
+                    getter,
+                    default=self._MapEmpty,
+                )
+                have_check_expr = checked is not self._MapEmpty
+                if have_check_expr and not bool(checked):
+                    continue
+            result.append(self.safe_get("expression", obj, getter))
+        return ExpTuple(result)
+
+
 LOGIC_HANDLERS = {
     "||": OrHandler(),
     "&&": AndHandler(),
@@ -396,24 +461,26 @@ for k, alias in (
 
 
 MATH_HANDLERS = {
+    "*": SimpleMathHandler(operator.mul),
+    "**": SimpleMathHandler(operator.pow),
     "+": SimpleMathHandler(operator.add),
     "-": MinusHandler(),
-    "*": SimpleMathHandler(operator.mul),
     "/": SimpleMathHandler(operator.truediv),
     "//": SimpleMathHandler(operator.floordiv),
-    "**": SimpleMathHandler(operator.pow),
-    "mod": SimpleMathHandler(operator.mod),
-    "neg": UnarySimpleMathHandler(operator.neg),
-    "between": BetweenHandler(),
     "<": RelComparisonHandler(operator.lt),
     "<=": RelComparisonHandler(operator.le),
     ">": RelComparisonHandler(operator.gt),
     ">=": RelComparisonHandler(operator.ge),
-    "min": MinHandler(),
-    "max": MaxHandler(),
+    "abs": SimpleMathHandler(operator.abs),
+    "between": BetweenHandler(),
+    "bool": UnarySimpleMathHandler(handler=bool),
     "float": UnarySimpleMathHandler(handler=float),
     "int": UnarySimpleMathHandler(handler=int),
-    "bool": UnarySimpleMathHandler(handler=bool),
+    "max": MaxHandler(),
+    "min": MinHandler(),
+    "mod": SimpleMathHandler(operator.mod),
+    "neg": UnarySimpleMathHandler(operator.neg),
+    "sum": SumHandler(),
 }
 for k, alias in (
     ("+", "add"),
@@ -426,15 +493,23 @@ for k, alias in (
     MATH_HANDLERS[alias] = MATH_HANDLERS[k]
 
 MISC_HANDLERS = {
-    "is_set": IsSetHandler(),
+    "and": SimpleOpHandler(operator.and_),
+    "comment": CommentHandler(),
+    "concat": SimpleOpHandler(operator.concat),
+    "contains": SimpleOpHandler(operator.contains),
+    "dict": DictHandler(),
     "get": GetHandler(),
     "index": IndexHandler(),
-    "s_": S_Handler(),
-    "unsafe_call": UnsafeCallHandler(),
-    "dict": DictHandler(),
-    "comment": CommentHandler(),
-    "set_var": SetVarHandler(),
+    "is_set": IsSetHandler(),
+    "map": MapHandler(),
+    "op_or": SimpleOpHandler(operator.or_),
+    "op_and": SimpleOpHandler(operator.and_),
+    "op_xor": SimpleOpHandler(operator.xor),
+    "print": PrintHandler(),
     "return": ReturnHandler(),
+    "s_": S_Handler(),
+    "set_var": SetVarHandler(),
+    "unsafe_call": UnsafeCallHandler(),
 }
 
 BASIC_HANDLERS = LOGIC_HANDLERS | MATH_HANDLERS | MISC_HANDLERS

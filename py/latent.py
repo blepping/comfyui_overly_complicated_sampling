@@ -1,3 +1,5 @@
+from typing import Any, NamedTuple, Self
+
 import folder_paths
 import latent_preview
 import numpy as np
@@ -40,7 +42,7 @@ def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
 # Improvements by https://github.com/Clybius
 # The following is modified to work with latent images of ~0 mean from https://github.com/Jamy-L/Pytorch-Contrast-Adaptive-Sharpening/tree/main.
 # The algorithm is directly implemented from FidelityFX's source code that can be found here: https://github.com/GPUOpen-Effects/FidelityFX-CAS/blob/master/ffx-cas/ffx_cas.h.
-def contrast_adaptive_sharpening(  # noqa: PLR0914
+def contrast_adaptive_sharpening(
     x,
     amount=0.8,
     *,
@@ -121,45 +123,6 @@ def contrast_adaptive_sharpening(  # noqa: PLR0914
     if normalize:
         output = output.add_(orig_mean).mul_(luminance)
     return output.reshape(*orig_shape)
-
-
-def flip_tensor_range(
-    x: torch.Tensor,
-    *,
-    min_neg: torch.Tensor | None = None,
-    max_pos: torch.Tensor | None = None,
-    return_ranges: bool = False,
-    dim: int = -1,
-    eps: float | None = None,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if eps is None:
-        eps = torch.finfo(x.dtype).eps * 1.25
-    # 1. Use the provided maximum positive values, or calculate them dynamically
-    if max_pos is None:
-        max_pos = (
-            torch.clamp_min(x, 0.0).max(dim=dim, keepdim=True).values.clamp_min_(eps)
-        )
-
-    # 2. Use the provided minimum negative values, or calculate them dynamically
-    if min_neg is None:
-        min_neg = (
-            torch.clamp_max(x, 0.0).min(dim=dim, keepdim=True).values.clamp_max_(-eps)
-        )
-
-    # 3. Separate positive and negative elements
-    is_pos = x >= 0
-
-    # 4. Flip positive side: [0, max_pos] -> [eps, max_pos + eps]
-    x_pos = x.clamp_min(eps)
-    flipped_pos = (max_pos + eps) - x_pos
-
-    # 5. Flip negative side: [min_neg, 0] -> [min_neg - eps, -eps]
-    x_neg = x.clamp_max(-eps)
-    flipped_neg = (min_neg - eps) - x_neg
-
-    # 6. Recombine the domains
-    result = torch.where(is_pos, flipped_pos, flipped_neg)
-    return (result, max_pos, min_neg) if return_ranges else result
 
 
 class ImageBatch(tuple):
@@ -265,7 +228,7 @@ def scale_samples(
 
 def get_noise_sampler(noise_type, x, *_args: list, **_kwargs: dict):  # noqa: F811
     if noise_type != "gaussian":
-        raise ValueError("Only gaussian noise supported")
+        raise ValueError("Only gaussian noise supported unless you have ComfyUI-sonar")
     return lambda _s, _sn: torch.randn_like(x)
 
 
@@ -361,7 +324,7 @@ class OCSLatentFormat:
 
     def latent_to_rgb(self, latent: torch.Tensor) -> torch.Tensor:
         # NCHW -> NHWC
-        if self.latent_factors is None:
+        if self.rgb_factors is None:
             raise ValueError("No RGB factors for latent type!")
         return torch.nn.functional.linear(
             latent.movedim(1, -1), self.rgb_factors, bias=self.rgb_factors_bias
@@ -369,8 +332,315 @@ class OCSLatentFormat:
 
     def rgb_to_latent(self, img: torch.Tensor) -> torch.Tensor:
         # NHWC
-        if self.latent_factors is None:
+        if self.rgb_factors is None:
             raise ValueError("No RGB factors for latent type!")
         if self.rgb_factors_bias is not None:
             img = img - self.rgb_factors_bias
         return torch.nn.functional.linear(img, self.rgb_factors_inv)
+
+
+def randomized_svd(
+    m: torch.Tensor,
+    *,
+    rank: int | None = None,
+    n_iter: int = 6,
+    ortho_interval: int = 3,
+    oversample: int = 10,
+    noise_sampler: Callable | None = None,
+    y: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    n, c = m.shape[-2], m.shape[-1]
+    if rank is None:
+        rank = n
+    if y is None:
+        if noise_sampler is None:
+            noise_sampler = torch.randn
+        k = min(rank + oversample, n, c)
+        y_shape = (*m.shape[:-2], c, k)
+        y = noise_sampler(y_shape, device=m.device, dtype=m.dtype)
+    elif y.shape == m.shape:
+        y = y.mT
+    elif y.shape != m.mT.shape:
+        raise ValueError("Bad initial y shape")
+    y = m @ y
+
+    ortho = False
+    for idx in range(n_iter):
+        y = m @ (m.mT @ y)
+        ortho = ortho_interval > 0 and (idx % ortho_interval) == 0 and n_iter - idx != 2
+        if ortho:
+            y = torch.linalg.qr(y)[0]
+
+    q = y if ortho else torch.linalg.qr(y)[0]
+    u, s, vh = torch.linalg.svd(q.mT @ m, full_matrices=False)
+    u = q @ u
+    if rank < n:
+        return u[..., :rank], s[..., :rank], vh[..., :rank, :]
+    return u, s, vh
+
+
+class DimCorrelationOrder(NamedTuple):
+    perm: torch.Tensor
+    dim: int
+    leave: bool = False
+
+    def reorder(
+        self,
+        x: torch.Tensor,
+        *,
+        invert: bool = False,
+    ) -> torch.Tensor:
+        dim, perm = self.dim, self.perm
+        if invert:
+            perm = perm.argsort(dim=-1)
+        if dim < 0:
+            dim = x.ndim + self.dim
+        shape = [1] * x.ndim
+        if dim != 0:
+            shape[0] = x.shape[0]
+        shape[dim] = x.shape[dim]
+        perm = perm.view(*shape).expand_as(x)
+        return x.gather(dim=dim, index=perm)
+
+
+class DimCorrelationConfig(NamedTuple):
+    dim: int = 1
+    flip: bool = False
+    cross: bool = False
+    leave: bool = False
+    preserve_first: bool = False
+    center_strength: float = 1.0
+    center_dim: int = -1
+    # None - disabled, otherwise controls whether abs occurs before or after centering.
+    abs_before: bool | None = None
+    # 0 - disabled, positive value - enabled, negative value - enabled with sign flipped.
+    fix_sign: int = 1
+    align_to_peak: bool = False
+    expansion_factor: int = 1  # NYI
+    # Only applies to cross mode. One of: svd, randomized_svd
+    decomp_mode: str = "svd"
+    low_rank: int = 0
+    low_rank_niter: int = 6
+    work_dtype: torch.dtype | None = None
+    pc: int = 0
+
+    @classmethod
+    def build(cls, **kwargs: Any) -> Self:
+        wd = kwargs.get("work_dtype")
+        if isinstance(wd, str):
+            dtype_map = {
+                "float64": torch.float64,
+                "float32": torch.float32,
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            wd = dtype_map.get(wd)
+            if wd is None:
+                raise ValueError("Bad dtype")
+            kwargs["work_dtype"] = wd
+        if kwargs.get("decomp_mode") not in {None, "svd", "randomized_svd"}:
+            raise ValueError(
+                "Bad decomp mode, must be unset or one of: svd, randomized_svd",
+            )
+        fs = frozenset(cls._fields)
+        kwargs = {k: v for k, v in kwargs.items() if k in fs}
+        return cls(**kwargs)
+
+    @classmethod
+    def from_str(cls, s: str) -> Self:
+        parts = tuple(p.strip() for p in s.split(":", 3))
+        plen = len(parts)
+        if plen > 2:
+            raise ValueError("Dim correlations only support up to two parts.")
+        dim = int(parts[0])
+        result = cls(dim=dim)
+        if plen < 2 or not parts[1]:
+            return result
+        p1 = parts[1]
+        p1len = len(p1)
+        offs = 0
+        while offs < p1len:
+            pflag = p1[offs]
+            offs += 1
+            if pflag == "f":
+                result = result._replace(flip=True)
+            elif pflag == "x":
+                result = result._replace(cross=True)
+            elif pflag == "l":
+                result = result._replace(leave=True)
+            elif pflag == "u":
+                result = result._replace(center_strength=0.0)
+            elif pflag == "c":
+                result = result._replace(center_dim=-2)
+            elif pflag in "aA":
+                result = result._replace(abs_before=pflag == "a")
+            elif pflag == "s":
+                result = result._replace(fix_sign=0)
+            elif pflag == "S":
+                result = result._replace(fix_sign=-1)
+            elif pflag == "p":
+                result = result._replace(align_to_peak=True)
+            elif pflag == "i":
+                result = result._replace(preserve_first=True)
+            else:
+                offs -= 1
+                break
+        p1 = p1[offs:].strip()
+        pc = int(p1) if p1 else 0
+        return result._replace(pc=pc)
+
+    @classmethod
+    def _fix_sign_ambiguity(
+        cls,
+        x: torch.Tensor,
+        *,
+        ref: torch.Tensor | None = None,
+        dim: int = -1,
+        in_place: bool = True,
+        neg: bool = False,
+    ) -> torch.Tensor:
+        if ref is not None:
+            x = cls._fix_sign_ambiguity(x, dim=dim, in_place=in_place)
+        else:
+            ref = x
+        signs = ref.gather(dim, ref.abs().argmax(dim=dim, keepdim=True)).sign_()
+        signs = signs.masked_fill_(signs == 0, 1.0)
+        if neg:
+            signs = signs.neg_()
+        return x.mul_(signs) if in_place else x * signs
+
+    @staticmethod
+    def _preserve_first_index(perm: torch.Tensor) -> torch.Tensor:
+        c = perm.shape[-1]
+        shift = (perm == 0).to(dtype=torch.int64).argmax(dim=-1, keepdim=True)
+        shift = torch.arange(c, device=perm.device, dtype=shift.dtype) + shift
+        shift %= c
+        return perm.gather(dim=-1, index=shift)
+
+    @staticmethod
+    def _align_ref(
+        *,
+        x: torch.Tensor,
+        ref: torch.Tensor,
+        skip_dim: int,
+    ) -> torch.Tensor:
+        if skip_dim < 0:
+            skip_dim = x.ndim + skip_dim
+        reps = tuple(
+            None if szr == 0 or szx % szr != 0 else (d, szx // szr)
+            for d, (szx, szr) in enumerate(zip(x.shape, ref.shape, strict=True))
+            if d != skip_dim and szx != szr
+        )
+        if not all(reps):
+            raise ValueError("Bad shape")
+        for d, r in reps:
+            ref = ref.repeat_interleave(r, d)
+        return ref
+
+    def _get_correlation_order(
+        self,
+        cov: torch.Tensor,
+        *,
+        pc_idx: int = 0,
+        cross_mode: bool = False,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        if cross_mode:
+            if self.decomp_mode == "randomized_svd":
+                pcs = randomized_svd(cov, n_iter=self.low_rank_niter, **kwargs)[0]
+            elif self.low_rank < 1:
+                pcs = torch.linalg.svd(cov, full_matrices=False).U
+            else:
+                pcs = torch.svd_lowrank(
+                    cov,
+                    q=self.low_rank,
+                    niter=self.low_rank_niter,
+                )[0]
+            n_pcs = pcs.shape[-1]
+            if pc_idx < 0:
+                pc_idx = n_pcs + pc_idx
+        else:
+            pcs = torch.linalg.eigh(cov).eigenvectors
+            n_pcs = pcs.shape[-1]
+            pc_idx = n_pcs - pc_idx - 1 if pc_idx >= 0 else pc_idx + 1
+        pc_idx = max(0, min(n_pcs - 1, pc_idx))
+        return pcs[..., pc_idx]
+
+    def _preprocess(
+        self,
+        x: torch.Tensor,
+        *,
+        dim: int,
+        allow_post_abs: bool = True,
+    ) -> torch.Tensor:
+        x_flat = (x.unsqueeze(0) if dim == 0 else x.movedim(dim, 1)).flatten(
+            start_dim=2
+        )
+        if self.abs_before is True:
+            x_flat = x_flat.abs()
+        if self.center_strength == 0:
+            return x_flat
+        xm = x_flat.mean(dim=self.center_dim, keepdim=True)
+        if self.center_strength != 1:
+            xm *= self.center_strength
+        x_flat = x_flat.sub_(xm) if self.abs_before else x_flat - xm
+        if allow_post_abs and self.abs_before is False:
+            x_flat = x_flat.abs_()
+        return x_flat
+
+    def get_correlation_order(
+        self,
+        x: torch.Tensor,
+        *,
+        ref: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> DimCorrelationOrder:
+        if self.work_dtype is not None:
+            if x.dtype != self.work_dtype:
+                x = x.to(dtype=self.work_dtype)
+            if ref is not None and ref.dtype != self.work_dtype:
+                ref = ref.to(dtype=self.work_dtype)
+        dim, pc_idx = self.dim, self.pc
+        if dim < 0:
+            dim = x.ndim + dim
+        allow_post_abs = self.abs_before is not False or not self.align_to_peak
+        x_flat = self._preprocess(
+            x,
+            dim=dim,
+            allow_post_abs=ref is not None or allow_post_abs,
+        )
+        if ref is None or not self.cross:
+            # if ref is None:
+            y_flat = x_flat
+            if not allow_post_abs:
+                sign_ref = y_flat.clone()
+                y_flat = y_flat.abs_()
+            else:
+                sign_ref = y_flat if self.align_to_peak else None
+        else:
+            if ref.shape != x.shape:
+                ref = self._align_ref(x=x, ref=ref, skip_dim=dim)
+            y_flat = self._preprocess(ref, dim=dim, allow_post_abs=allow_post_abs)
+            if not allow_post_abs:
+                sign_ref = y_flat.clone()
+                y_flat = y_flat.abs_()
+            else:
+                sign_ref = y_flat if self.align_to_peak else None
+        pc = self._get_correlation_order(
+            x_flat @ y_flat.mT,
+            pc_idx=pc_idx,
+            cross_mode=ref is not None,
+            **kwargs,
+        )
+        if self.fix_sign:
+            pc = self._fix_sign_ambiguity(
+                pc,
+                neg=self.fix_sign < 0,
+                ref=None
+                if sign_ref is None
+                else sign_ref.flatten(start_dim=0 if dim == 0 else 1),
+            )
+        perm = pc.argsort(dim=-1, descending=self.flip)
+        if self.preserve_first:
+            perm = self._preserve_first_index(perm)
+        return DimCorrelationOrder(dim=dim, perm=perm, leave=self.leave)

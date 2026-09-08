@@ -852,13 +852,15 @@ class ExpressionFilteredLatentOperationNode:
         latent_ref_3_opt: dict | None = None,
     ) -> tuple:
         config = yaml.safe_load(yaml_config)
-        if not isinstance(config, dict) or "filter" not in config:
+        if isinstance(config, str):
+            config = {"filter": {"final": config}}
+        elif not isinstance(config, dict) or "filter" not in config:
             raise ValueError(
                 "Bad YAML config type (must be object) or missing filter key in config"
             )
         filter_def = config.get("filter")
         if not isinstance(filter_def, dict):
-            raise ValueError("Bad type for filter definition, must be object")
+            raise TypeError("Bad type for filter definition, must be object")
         latent_refs = {
             k: v["samples"].to(device="cpu", dtype=torch.float32, copy=True)
             for k, v in (
@@ -935,13 +937,15 @@ class ExpressionFilteredModelPatchNode:
         latent_ref_3_opt: dict | None = None,
     ) -> tuple:
         config = yaml.safe_load(yaml_config)
-        if not isinstance(config, dict) or "filter" not in config:
+        if isinstance(config, str):
+            config = {"filter": {"final": config}}
+        elif not isinstance(config, dict) or "filter" not in config:
             raise ValueError(
                 "Bad YAML config type (must be object) or missing filter key in config"
             )
         filter_def = config.get("filter")
         if not isinstance(filter_def, dict):
-            raise ValueError("Bad type for filter definition, must be object")
+            raise TypeError("Bad type for filter definition, must be object")
         latent_refs = {
             k: v["samples"].to(device="cpu", dtype=torch.float32, copy=True)
             for k, v in (

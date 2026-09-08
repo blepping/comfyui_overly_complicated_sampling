@@ -7,7 +7,7 @@ from .util import torch
 
 
 class Arg:
-    __slots__ = ("name", "default", "validator")
+    __slots__ = ("default", "name", "validator")
 
     def __init__(self, name, default=Empty, *, validator=None):
         self.name = name
@@ -54,6 +54,12 @@ class Arg:
         )
 
     @classmethod
+    def numeric_sequence(cls, name, default=Empty):
+        return cls(
+            name, default=default, validator=ValidateArg.validate_numeric_sequence
+        )
+
+    @classmethod
     def numscalar_sequence_or_single(cls, name, default=Empty):
         return cls.one_of(
             name,
@@ -97,8 +103,8 @@ class Arg:
         return cls(name, default=default, validator=ValidateArg.validate_boolean)
 
     @classmethod
-    def present(cls, name):
-        return cls(name, validator=ValidateArg.validate_passthrough)
+    def present(cls, name, default=Empty):
+        return cls(name, default=default, validator=ValidateArg.validate_passthrough)
 
     @classmethod
     def one_of(cls, name, validators, *, default=Empty):
@@ -120,7 +126,7 @@ class ValidateError(Exception):
 
 
 class ValidateArg:
-    __slots__ = ("valfuns", "groupfun", "kwargs", "kwargslist")
+    __slots__ = ("groupfun", "kwargs", "kwargslist", "valfuns")
 
     def __init__(self, name, *args, kwargslist=(), group=all, **kwargs):
         if not isinstance(name, (list, tuple)):
@@ -234,6 +240,10 @@ class ValidateArg:
         return cls.validate_sequence(
             idx, val, item_validator=cls.validate_numeric_scalar
         )
+
+    @classmethod
+    def validate_numeric_sequence(cls, idx, val):
+        return cls.validate_sequence(idx, val, item_validator=cls.validate_numeric)
 
     @classmethod
     def validate_tensor_slice(cls, idx, val):
